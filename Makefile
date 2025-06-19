@@ -22,7 +22,7 @@ install_it:
 
 ./bin/genAnalysis: genAnalysis.cc 
 	@rm -f ./bin/genAnalysis 
-	g++ $(FLAGS) genAnalysis.cc -o ./bin/genAnalysis $(LIBS) 
+	g++ $(FLAGS) genAnalysis.cc KnuthWidth.cc -o ./bin/genAnalysis $(LIBS) -lMinuit 
 	@chmod 755 ./bin/genAnalysis
 
 clean: 

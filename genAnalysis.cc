@@ -202,8 +202,7 @@ int main(int argc, char **argv) {
     double minv = df.Min<double>(b).GetValue();
     double maxv = df.Max<double>(b).GetValue();
     auto data_b = df.Take<double>(b).GetValue();
-    double width = knuth_hist::knuth_bin_width(data_b);
-    size_t bins1 = static_cast<size_t>(std::ceil((maxv - minv) / width));
+    size_t bins1 = static_cast<size_t>(Knuth::computeNumberBins(data_b));
     ofs << makeHisto1D(b, bins1, minv, maxv, showErrors);
   }
 
@@ -219,10 +218,8 @@ int main(int argc, char **argv) {
       double ymax = df.Max<double>(y).GetValue();
       auto data_x = df.Take<double>(x).GetValue();
       auto data_y = df.Take<double>(y).GetValue();
-      double wx = knuth_hist::knuth_bin_width(data_x);
-      double wy = knuth_hist::knuth_bin_width(data_y);
-      size_t bx = static_cast<size_t>(std::ceil((xmax - xmin) / wx));
-      size_t by = static_cast<size_t>(std::ceil((ymax - ymin) / wy));
+      size_t bx = static_cast<size_t>(Knuth::computeNumberBins(data_x));
+      size_t by = static_cast<size_t>(Knuth::computeNumberBins(data_y));
       string xtitle = "Mass[" + particleNameToLatex(x) + "] (GeV)";
       string ytitle = "Mass[" + particleNameToLatex(y) + "] (GeV)";
       ofs << makeHisto2D(x, y, bx, xmin, xmax, by, ymin, ymax, xtitle, ytitle,
@@ -240,10 +237,8 @@ int main(int argc, char **argv) {
       double ymax = df.Max<double>(ang).GetValue();
       auto data_m = df.Take<double>(m).GetValue();
       auto data_a = df.Take<double>(ang).GetValue();
-      double wm = knuth_hist::knuth_bin_width(data_m);
-      double wa = knuth_hist::knuth_bin_width(data_a);
-      size_t bm = static_cast<size_t>(std::ceil((xmax - xmin) / wm));
-      size_t ba = static_cast<size_t>(std::ceil((ymax - ymin) / wa));
+      size_t bm = static_cast<size_t>(Knuth::computeNumberBins(data_m));
+      size_t ba = static_cast<size_t>(Knuth::computeNumberBins(data_a));
       string xtitle = "Mass[" + particleNameToLatex(m) + "] (GeV)";
       string ytitle = particleNameToLatex(ang);
       ofs << makeHisto2D(m, ang, bm, xmin, xmax, ba, ymin, ymax, xtitle, ytitle,
@@ -270,18 +265,15 @@ int main(int argc, char **argv) {
       std::vector<double> sqx, sqy;
       sqx.reserve(vec1.size());
       sqy.reserve(vec2.size());
-      for (auto v : vec1) sq1.push_back(v * v);
-      for (auto v : vec2) sq2.push_back(v * v);
-      double w1 = knuth_hist::knuth_bin_width(sqx);
-      double w2 = knuth_hist::knuth_bin_width(sqy);
-      size_t bins1 =
-          static_cast<size_t>(std::ceil((max1 * max1 - min1 * min1) / w1));
-      size_t bins2 =
-          static_cast<size_t>(std::ceil((max2 * max2 - min2 * min2) / w2));
+      for (auto v : vec1)
+        sq1.push_back(v * v);
+      for (auto v : vec2)
+        sq2.push_back(v * v);
+      size_t binsx = static_cast<size_t>(Knuth::computeNumberBins(sqx));
+      size_t binsy = static_cast<size_t>(Knuth::computeNumberBins(sqy));
       string xtitle = "Mass[" + particleNameToLatex(b1) + "]^{2} (GeV^{2})";
       string ytitle = "Mass[" + particleNameToLatex(b2) + "]^{2} (GeV^{2})";
-      ofs << makeHisto2D(sq1, sq2, bins1, min1 * min1, max1 * max1, bins2,
-
+      ofs << makeHisto2D(sq1, sq2, binsx, min1 * min1, max1 * max1, binsy,
                          min2 * min2, max2 * max2, xtitle, ytitle, showErrors,
                          dfName);
       counter++;
