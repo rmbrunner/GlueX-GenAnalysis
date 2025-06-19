@@ -21,4 +21,4 @@ To run:
 # Warning
 For complex final states the generated output will be *very* large. It may be relevant to trim down the default branches.txt file to a much smaller number.
 
-The number of possible combinations of final state particles goes as 2ⁿ - 1 and the number of plots as A * ₙC₂ where A is the number of types of plots. 
+The number of possible combinations of final state particles goes as n = 2ᴺ - 1 and the number of plots as A * ₙC₂ where A is the number of types of plots. 
