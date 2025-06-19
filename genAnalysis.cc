@@ -4,9 +4,10 @@
 // It inspects an input ROOT file, computes histogram ranges and bin widths,
 // and writes out code that uses RDataFrame to create 1D and 2D histograms
 
-// (including Dalitz plots) with LaTeX axes, toggled error bars, and optimized
+// (including Dalitz plots) with LaTeX axes, error bars, and optimized
 // bins.
 
+#include "KnuthWidth.h"
 #include <ROOT/RDataFrame.hxx>
 #include <TCanvas.h>
 #include <TFile.h>
@@ -14,6 +15,7 @@
 #include <TLegend.h>
 #include <TTree.h>
 #include <cmath>
+#include <cstddef>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -66,10 +68,6 @@ string particleNameToLatex(const string &branch) {
   return joined;
 }
 
-size_t knuthBins(Long64_t n) {
-  return static_cast<size_t>(std::ceil(2.0 * std::pow(double(n), 2.0 / 5.0)));
-}
-
 string makeHisto1D(const string &b, size_t bins, double min, double max,
                    bool showErrors) {
   std::ostringstream out;
@@ -92,14 +90,15 @@ string makeHisto1D(const string &b, size_t bins, double min, double max,
 
 string makeHisto2D(const string &x, const string &y, size_t bx, double xmin,
                    double xmax, size_t by, double ymin, double ymax,
-                   const string &xlabel, const string &ylabel,
-                   bool showErrors, string dfName) {
+                   const string &xlabel, const string &ylabel, bool showErrors,
+                   string dfName) {
   std::ostringstream out;
   string histName = "h2_" + x + "_" + y;
   string title = xlabel + " vs. " + ylabel;
-  out << "  auto " << histName << " = " << dfName << ".Histo2D({\"" << histName << "\",\""
-      << "" << "\"," << bx << "," << xmin << "," << xmax << "," << by << ","
-      << ymin << "," << ymax << "}, \"" << x << "\", \"" << y << "\");\n";
+  out << "  auto " << histName << " = " << dfName << ".Histo2D({\"" << histName
+      << "\",\"" << "" << "\"," << bx << "," << xmin << "," << xmax << "," << by
+      << "," << ymin << "," << ymax << "}, \"" << x << "\", \"" << y
+      << "\");\n";
   out << histName << "->GetXaxis()->SetTitle(\"" << xlabel << "\");"
       << std::endl;
   out << histName << "->GetYaxis()->SetTitle(\"" << ylabel << "\");"
@@ -166,7 +165,6 @@ int main(int argc, char **argv) {
         break;
       }
     }
-
   }
 
   vector<string> massCols, angleCols;
@@ -181,13 +179,14 @@ int main(int argc, char **argv) {
 
   ofs << "#include <ROOT/RDataFrame.hxx>\n"
       << "#include <TFile.h>\n"
-      << "#include <TCanvas.h>\n" 
+      << "#include <TCanvas.h>\n"
       << "#include <TKey.h>\n"
       << "using namespace ROOT;\n"
       << "void plots(){\n"
       << "  TFile *f = TFile::Open(\"" << inputFile << "\", \"READ\");\n"
-      << "  if (!f || f->IsZombie()) throw std::runtime_error(\"Cannot open \\\" "
-      << inputFile <<"\\\"\");\n"
+      << "  if (!f || f->IsZombie()) throw std::runtime_error(\"Cannot open "
+         "\\\" "
+      << inputFile << "\\\"\");\n"
       << "  TIter itKey(f->GetListOfKeys()); TKey *key; std::string tree;\n"
       << "  while ((key = (TKey*)itKey())) {\n    if "
          "(std::string(key->GetClassName()) == \"TTree\") { tree = "
@@ -196,14 +195,18 @@ int main(int argc, char **argv) {
       << "  auto df = RDataFrame(tree, \"" << inputFile << "\");\n"
       << "TFile* histograms =TFile::Open(\"histograms.root\", \"RECREATE\"); \n"
       << "histograms->cd();\n";
+
   std::cout << "Creating 1D Histograms..." << std::endl;
+
   for (auto &b : massCols) {
     double minv = df.Min<double>(b).GetValue();
     double maxv = df.Max<double>(b).GetValue();
-    Long64_t n = df.Count().GetValue();
-    size_t bins1 = knuthBins(n);
+    auto data_b = df.Take<double>(b).GetValue();
+    double width = knuth_hist::knuth_bin_width(data_b);
+    size_t bins1 = static_cast<size_t>(std::ceil((maxv - minv) / width));
     ofs << makeHisto1D(b, bins1, minv, maxv, showErrors);
   }
+
   std::cout << "Creating 2D Mass Correlation Plots..." << std::endl;
   for (size_t i = 0; i < massCols.size(); ++i) {
     for (size_t j = i + 1; j < massCols.size(); ++j) {
@@ -214,11 +217,15 @@ int main(int argc, char **argv) {
       double xmax = df.Max<double>(x).GetValue();
       double ymin = df.Min<double>(y).GetValue();
       double ymax = df.Max<double>(y).GetValue();
-      Long64_t n = df.Count().GetValue();
-      size_t bx = knuthBins(n), by = knuthBins(n);
-      string xlab = "Mass[" + particleNameToLatex(x) + "] (GeV)";
-      string ylab = "Mass[" + particleNameToLatex(y) + "] (GeV)";
-      ofs << makeHisto2D(x, y, bx, xmin, xmax, by, ymin, ymax, xlab, ylab,
+      auto data_x = df.Take<double>(x).GetValue();
+      auto data_y = df.Take<double>(y).GetValue();
+      double wx = knuth_hist::knuth_bin_width(data_x);
+      double wy = knuth_hist::knuth_bin_width(data_y);
+      size_t bx = static_cast<size_t>(std::ceil((xmax - xmin) / wx));
+      size_t by = static_cast<size_t>(std::ceil((ymax - ymin) / wy));
+      string xtitle = "Mass[" + particleNameToLatex(x) + "] (GeV)";
+      string ytitle = "Mass[" + particleNameToLatex(y) + "] (GeV)";
+      ofs << makeHisto2D(x, y, bx, xmin, xmax, by, ymin, ymax, xtitle, ytitle,
                          showErrors, dfName);
     }
   }
@@ -231,8 +238,12 @@ int main(int argc, char **argv) {
       double xmax = df.Max<double>(m).GetValue();
       double ymin = df.Min<double>(ang).GetValue();
       double ymax = df.Max<double>(ang).GetValue();
-      Long64_t n = df.Count().GetValue();
-      size_t bm = knuthBins(n), ba = knuthBins(n);
+      auto data_m = df.Take<double>(m).GetValue();
+      auto data_a = df.Take<double>(ang).GetValue();
+      double wm = knuth_hist::knuth_bin_width(data_m);
+      double wa = knuth_hist::knuth_bin_width(data_a);
+      size_t bm = static_cast<size_t>(std::ceil((xmax - xmin) / wm));
+      size_t ba = static_cast<size_t>(std::ceil((ymax - ymin) / wa));
       string xtitle = "Mass[" + particleNameToLatex(m) + "] (GeV)";
       string ytitle = particleNameToLatex(ang);
       ofs << makeHisto2D(m, ang, bm, xmin, xmax, ba, ymin, ymax, xtitle, ytitle,
@@ -248,19 +259,31 @@ int main(int argc, char **argv) {
       string sq2 = b2 + "_sq";
       string dfName = "df2_" + std::to_string(counter);
       ofs << "  auto df2_" << counter << " = df.Define(\"" << sq1
-          << "\",[](double x){return x*x;}, {\"" << b1 << "\"}).Define(\"" << sq2
-          << "\",[](double x){return x*x;}, {\"" << b2 << "\"});\n";
+          << "\",[](double x){return x*x;}, {\"" << b1 << "\"}).Define(\""
+          << sq2 << "\",[](double x){return x*x;}, {\"" << b2 << "\"});\n";
       double min1 = df.Min<double>(b1).GetValue();
       double max1 = df.Max<double>(b1).GetValue();
       double min2 = df.Min<double>(b2).GetValue();
       double max2 = df.Max<double>(b2).GetValue();
-      Long64_t n = df.Count().GetValue();
-      size_t bins = knuthBins(n);
+      auto vec1 = df.Take<double>(b1).GetValue();
+      auto vec2 = df.Take<double>(b2).GetValue();
+      std::vector<double> sqx, sqy;
+      sqx.reserve(vec1.size());
+      sqy.reserve(vec2.size());
+      for (auto v : vec1) sq1.push_back(v * v);
+      for (auto v : vec2) sq2.push_back(v * v);
+      double w1 = knuth_hist::knuth_bin_width(sqx);
+      double w2 = knuth_hist::knuth_bin_width(sqy);
+      size_t bins1 =
+          static_cast<size_t>(std::ceil((max1 * max1 - min1 * min1) / w1));
+      size_t bins2 =
+          static_cast<size_t>(std::ceil((max2 * max2 - min2 * min2) / w2));
       string xtitle = "Mass[" + particleNameToLatex(b1) + "]^{2} (GeV^{2})";
       string ytitle = "Mass[" + particleNameToLatex(b2) + "]^{2} (GeV^{2})";
-      ofs << makeHisto2D(sq1, sq2, bins, min1 * min1, max1 * max1, bins,
+      ofs << makeHisto2D(sq1, sq2, bins1, min1 * min1, max1 * max1, bins2,
 
-                         min2 * min2, max2 * max2, xtitle, ytitle, showErrors, dfName);
+                         min2 * min2, max2 * max2, xtitle, ytitle, showErrors,
+                         dfName);
       counter++;
     }
   }
