@@ -8,7 +8,7 @@ Note that, by default, the program will attempt to auto-detect the name of the t
 # Installation
 For now I suggest in-directory installation (especially for JLab vdi users). Simply copy this projects files into your directory and run:
 `make build_it`
-Which will install the executable in a `bin/` folder.
+Which will install the executable in a `bin/` folder in the current directory.
 
 # Usage
 `genAnalysis <input_ROOT_file> <branches.txt> <output_program.C>`
