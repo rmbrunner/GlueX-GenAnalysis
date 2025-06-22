@@ -24,6 +24,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 using namespace ROOT;
@@ -31,6 +32,18 @@ using std::map;
 using std::set;
 using std::string;
 using std::vector;
+
+static std::vector<std::string> splitTokens(const std::string &s)
+{
+    std::vector<std::string> toks;
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, '_'))
+    {
+        toks.push_back(item);
+    }
+    return toks;
+}
 
 string particleNameToLatex(const string &branch)
 {
@@ -130,11 +143,12 @@ int main(int argc, char **argv)
     string csvFile = argv[2];
     string outFile = argv[3];
     bool showErrors = (argc > 4 ? std::stoi(argv[4]) : 0);
-    unsigned long int totalPlots = 0;
+    size_t totalPlots = 0;
 
     std::ifstream ifs(csvFile);
     vector<TString> sel;
     std::string line;
+    // read in and sanitize combo names
     while (std::getline(ifs, line))
     {
         if (!line.empty())
@@ -173,7 +187,13 @@ int main(int argc, char **argv)
     vector<string> cols;
     for (const auto &b : allCols)
     {
-        TString tmp = b;
+        string stripped = b;
+        const string prefix = "mass_";
+        if (stripped.rfind(prefix, 0) == 0)
+        {
+            stripped = stripped.substr(prefix.size());
+        }
+        TString tmp = stripped;
         for (auto &i : sel)
         {
             TString thing = i;
@@ -183,34 +203,6 @@ int main(int argc, char **argv)
                 cols.push_back(b);
                 break;
             }
-        }
-    }
-
-    vector<string> massCols, singlePartCols, angleCols;
-    for (auto &b : cols)
-    {
-        if (b.find("costh") != string::npos || b.find("phi") != string::npos)
-        {
-            angleCols.push_back(b);
-        }
-        else
-        {
-            massCols.push_back(b);
-        }
-    }
-
-    for (auto &b : massCols)
-    {
-        string s = b;
-        // strip "mass_" prefix if present
-        if (s.rfind("mass_", 0) == 0)
-        {
-            s = s.substr(5);
-        }
-        // only one particle name → no embedded underscore
-        if (s.find('_') == string::npos)
-        {
-            singlePartCols.push_back(b);
         }
     }
 
@@ -238,81 +230,113 @@ int main(int argc, char **argv)
         << "std::ifstream totalplots(\"totalPlots.txt\");\n"
         << "std::string total;\n"
         << "std::getline(totalplots,total);\n"
-        << "unsigned long int numplots = std::stoul(total);\n"
-        << "unsigned long int progress = 0;\n"
+        << "size_t numplots = std::stoul(total);\n"
+        << "size_t progress = 0;\n"
         << "histograms->cd();\n";
 
     std::cout << "Creating 1D Histograms..." << std::endl;
 
-    for (auto &b : massCols)
+    for (auto &b : cols)
     {
         double minv = df.Min<double>(b).GetValue();
         double maxv = df.Max<double>(b).GetValue();
         auto data_b = df.Take<double>(b).GetValue();
-        size_t bins1 = 104; //static_cast<size_t>(Knuth::computeNumberBins(data_b));
+        size_t bins1 = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_b));
         ofs << makeHisto1D(b, bins1, minv, maxv, showErrors);
         totalPlots++;
     }
 
     std::cout << "Creating Angular Distribution Plots..." << std::endl;
-    for (auto &ang : angleCols)
+    for (auto &m : cols)
     {
-        // extract which particle this angle is for
-        string part = ang;
-        // e.g. "costh_PiPlus" → "PiPlus"
-        size_t p = part.find('_');
-        if (p != string::npos)
+        // only match if mass column is for the same particle
+        string mass = m;
+        const string prefix = "mass_";
+        if (m.rfind(prefix, 0) == 0)
         {
-            part = part.substr(p + 1);
+            m = m.substr(prefix.size());
         }
+        string costh = "costh_";
+        string phi = "phi_";
+        string dfName = "df";
+        string clab = costh + "lab_" + m, plab = phi + "lab_" + m;
+        // cGJ = costh + "GJ" +m,
+        // pGJ = phi + "GJ" + m,
+        // cH = costh + "H" + m,
+        // pH = phi + "H" + m;
 
-        for (auto &m : singlePartCols)
-        {
-            // only match if mass column is for the same particle
-            string mpart = m;
-            if (mpart.rfind("mass_", 0) == 0)
-            {
-                mpart = mpart.substr(5);
-            }
-            if (mpart != part)
-            {
-                continue;
-            }
+        double xmin = df.Min<double>(mass).GetValue();
+        double xmax = df.Max<double>(mass).GetValue();
+        double clabmin = df.Min<double>(clab).GetValue();
+        double clabmax = df.Max<double>(clab).GetValue();
+        double plabmin = df.Min<double>(plab).GetValue();
+        double plabmax = df.Max<double>(plab).GetValue();
+        // double cGJmin = df.Min<double>(cGJ).GetValue();
+        // double cGJmax = df.Max<double>(cGJ).GetValue();
+        // double pGJmin = df.Min<double>(pGJ).GetValue();
+        // double pGJmax = df.Max<double>(pGJ).GetValue();
+        // double cHmin = df.Min<double>(cH).GetValue();
+        // double cHmax = df.Max<double>(cH).GetValue();
+        // double pHmin = df.Min<double>(pH).GetValue();
+        // double pHmax = df.Max<double>(pH).GetValue();
 
-            string dfName = "df";
-            double xmin = df.Min<double>(m).GetValue();
-            double xmax = df.Max<double>(m).GetValue();
-            double ymin = df.Min<double>(ang).GetValue();
-            double ymax = df.Max<double>(ang).GetValue();
+        // auto data_m = df.Take<double>(m).GetValue();
+        // auto data_clab = df.Take<double>(clab).GetValue();
+        // auto data_plab = df.Take<double>(plab).GetValue();
+        // auto data_cGJ = df.Take<double>(cGJ).GetValue();
+        // auto data_pGJ = df.Take<double>(pGJ).GetValue();
+        // auto data_cH = df.Take<double>(cH).GetValue();
+        // auto data_pH = df.Take<double>(pH).GetValue();
 
-            auto data_m = df.Take<double>(m).GetValue();
-            auto data_a = df.Take<double>(ang).GetValue();
-            size_t bm = 104; //static_cast<size_t>(Knuth::computeNumberBins(data_m));
-            size_t ba = 104; //static_cast<size_t>(Knuth::computeNumberBins(data_a));
+        size_t bm = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_m));
+        size_t ba = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_a));
 
-            string xtitle = "Mass[" + particleNameToLatex(m) + "] (GeV)";
-            string ytitle = particleNameToLatex(ang);
-            ofs << makeHisto2D(m, ang, bm, xmin, xmax, ba, ymin, ymax, xtitle, ytitle, showErrors,
-                               dfName);
-            totalPlots++;
-        }
+        string xtitle = "Mass[" + particleNameToLatex(mass) + "] (GeV)";
+        string ytitle = "";
+        ytitle = particleNameToLatex(clab);
+        ofs << makeHisto2D(mass, clab, bm, xmin, xmax, ba, clabmin, clabmax, xtitle, ytitle,
+                           showErrors, dfName);
+        totalPlots++;
+        ytitle = particleNameToLatex(plab);
+        ofs << makeHisto2D(mass, plab, bm, xmin, xmax, ba, plabmin, plabmax, xtitle, ytitle,
+                           showErrors, dfName);
+        totalPlots++;
+        // ytitle = particleNameToLatex(cGJ);
+        // ofs << makeHisto2D(mass, data_cGJ, bm, xmin, xmax, ba, cGJmin, cGJmax, xtitle, ytitle,
+        // showErrors,
+        //                    dfName);
+        // totalPlots++;
+        // ytitle = particleNameToLatex(pGJ);
+        // ofs << makeHisto2D(mass, pGJ, bm, xmin, xmax, ba, pGJmin, pGJmax, xtitle, ytitle,
+        // showErrors,
+        //                    dfName);
+        // totalPlots++;
+        // ytitle = particleNameToLatex(cH);
+        // ofs << makeHisto2D(mass, cH, bm, xmin, xmax, ba, cHmin, cHmax, xtitle, ytitle, showErrors,
+        //                    dfName);
+        // totalPlots++;
+        // ytitle = particleNameToLatex(pH);
+        // ofs << makeHisto2D(mass, pH, bm, xmin, xmax, ba, pHmin, pHmax, xtitle, ytitle, showErrors,
+        //                    dfName);
+        // totalPlots++;
     }
+
     std::cout << "Creating 2D Mass Correlation Plots..." << std::endl;
-    for (size_t i = 0; i < massCols.size(); ++i)
+    for (size_t i = 0; i < cols.size(); ++i)
     {
-        for (size_t j = i + 1; j < massCols.size(); ++j)
+        for (size_t j = i + 1; j < cols.size(); ++j)
         {
             string dfName = "df";
-            auto &x = massCols[i];
-            auto &y = massCols[j];
+            string x = "mass_" + cols[i];
+            string y = "mass_" + cols[j];
             double xmin = df.Min<double>(x).GetValue();
             double xmax = df.Max<double>(x).GetValue();
             double ymin = df.Min<double>(y).GetValue();
             double ymax = df.Max<double>(y).GetValue();
             auto data_x = df.Take<double>(x).GetValue();
             auto data_y = df.Take<double>(y).GetValue();
-            size_t bx = 104; //static_cast<size_t>(Knuth::computeNumberBins(data_x));
-            size_t by = 104; //static_cast<size_t>(Knuth::computeNumberBins(data_y));
+            size_t bx = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_x));
+            size_t by = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_y));
             string xtitle = "Mass[" + particleNameToLatex(x) + "] (GeV)";
             string ytitle = "Mass[" + particleNameToLatex(y) + "] (GeV)";
             ofs << makeHisto2D(x, y, bx, xmin, xmax, by, ymin, ymax, xtitle, ytitle, showErrors,
@@ -322,12 +346,32 @@ int main(int argc, char **argv)
     }
 
     std::cout << "Creating 2D Dalitz Plots..." << std::endl;
-    unsigned long int counter = 0;
-    for (size_t i = 0; i < massCols.size(); ++i)
+    size_t counter = 0;
+    std::vector<std::vector<std::string>> tokens;
+    tokens.reserve(cols.size());
+    for (auto &c : cols)
     {
-        for (size_t j = i + 1; j < massCols.size(); ++j)
+        tokens.push_back(splitTokens(c));
+    }
+    for (size_t i = 0; i < cols.size(); ++i)
+    {
+        std::unordered_set<std::string> set_i(tokens[i].begin(), tokens[i].end());
+        for (size_t j = i + 1; j < cols.size(); ++j)
         {
-            auto &b1 = massCols[i], &b2 = massCols[j];
+            bool hasCommon = false;
+            for (auto &t : tokens[j])
+            {
+                if (set_i.count(t))
+                {
+                    hasCommon = true;
+                    break;
+                }
+                if (!hasCommon)
+                {
+                    continue;
+                }
+            }
+            string b1 = "mass_" + cols[i], b2 = "mass_" + cols[j];
             string sq1 = b1 + "_sq";
             string sq2 = b2 + "_sq";
             string dfName = "df2_" + std::to_string(counter);
@@ -351,8 +395,8 @@ int main(int argc, char **argv)
             {
                 sqy.push_back(v * v);
             }
-            size_t binsx = 104; //static_cast<size_t>(Knuth::computeNumberBins(sqx));
-            size_t binsy = 104; //static_cast<size_t>(Knuth::computeNumberBins(sqy));
+            size_t binsx = 104; // static_cast<size_t>(Knuth::computeNumberBins(sqx));
+            size_t binsy = 104; // static_cast<size_t>(Knuth::computeNumberBins(sqy));
             string xtitle = "Mass[" + particleNameToLatex(b1) + "]^{2} (GeV^{2})";
             string ytitle = "Mass[" + particleNameToLatex(b2) + "]^{2} (GeV^{2})";
             ofs << makeHisto2D(sq1, sq2, binsx, min1 * min1, max1 * max1, binsy, min2 * min2,

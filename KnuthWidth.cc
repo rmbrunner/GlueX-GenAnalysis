@@ -106,7 +106,7 @@ double computeNumberBins(const std::vector<double> &data_)
     // std::cerr << "[knuth] init M = " << initM << ", step = " << step << std::endl;
     minimizer->SetLimitedVariable(0, "M", initM, step, 1.0, double(Mmax));
 
-    bool ok = minimizer->Minimize();
+    // bool ok = minimizer->Minimize();
     //std::cerr << "[knuth] Minimize returned " << ok << std::endl;
 
     const double *xs = minimizer->X();
