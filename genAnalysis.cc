@@ -280,8 +280,9 @@ int main(int argc, char **argv)
         totalPlots++;
     }
     {
-        string m = "PiPlus_PiMinus1_Photon1_Photon2", cGJ = "costh_GJ" + m, pGJ = "phi_GJ" + m,
-               cH = "costh_H" + m, pH = "phi_H" + m, mass = "mass_" + m;
+        string m = "PiPlus_PiMinus1_Photon1_Photon2";
+        string mass = "mass_" + m;
+        string cGJ = "costh_GJ_" + m, pGJ = "phi_GJ_" + m, cH = "costh_H_" + m, pH = "phi_H_" + m;
         string dfName = "df";
         double xmin = df.Min<double>(mass).GetValue();
         double xmax = df.Max<double>(mass).GetValue();
@@ -294,7 +295,7 @@ int main(int argc, char **argv)
         double pHmin = df.Min<double>(pH).GetValue();
         double pHmax = df.Max<double>(pH).GetValue();
 
-        auto data_m = df.Take<double>(m).GetValue();
+        // auto data_m = df.Take<double>(mass).GetValue();
         auto data_cGJ = df.Take<double>(cGJ).GetValue();
         auto data_pGJ = df.Take<double>(pGJ).GetValue();
         auto data_cH = df.Take<double>(cH).GetValue();
