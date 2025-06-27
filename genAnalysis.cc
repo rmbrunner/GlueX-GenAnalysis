@@ -45,10 +45,10 @@ static std::vector<std::string> splitTokens(const std::string &s)
 string particleNameToLatex(const string &branch)
 {
     static const map<string, string> particleMap = {
-        {"PiMinus", "#pi^{-}"}, {"PiPlus", "#pi^{+}"}, {"KMinus", "K^{-}"},
-        {"KPlus", "K^{+}"},     {"Proton", "p"},       {"AntiProton", "#bar{p}"},
-        {"Neutron", "n"},       {"Electron", "e^{-}"}, {"Positron", "e^{+}"},
-        {"Photon", "#gamma"}};
+        {"PiMinus", "#pi^{-}"}, {"PiPlus", "#pi^{+}"},  {"KMinus", "K^{-}"},
+        {"KPlus", "K^{+}"},     {"Proton", "p"},        {"AntiProton", "#bar{p}"},
+        {"Neutron", "n"},       {"Electron", "e^{-}"},  {"Positron", "e^{+}"},
+        {"Photon", "#gamma"},   {"KShort", "K^{0}_{S}"}};
 
     string s = branch;
     if (s.rfind("mass_", 0) == 0)
@@ -146,12 +146,14 @@ int main(int argc, char **argv)
     vector<TString> sel;
     std::string line;
     // read in and sanitize combo names
+    string finalState;
     while (std::getline(ifs, line))
     {
         if (!line.empty())
         {
             line.erase(line.find_last_not_of(" \n\r\t") + 1);
             sel.push_back(line);
+            finalState = line;
         }
     }
 
@@ -257,6 +259,7 @@ int main(int argc, char **argv)
         string phi = "phi_";
         string dfName = "df";
         string clab = costh + "lab_" + m, plab = phi + "lab_" + m;
+        string cGJ = "costh_GJ_" + m, pGJ = "phi_GJ_" + m, cH = "costh_H_" + m, pH = "phi_H_" + m;
 
         double xmin = df.Min<double>(mass).GetValue();
         double xmax = df.Max<double>(mass).GetValue();
@@ -264,6 +267,31 @@ int main(int argc, char **argv)
         double clabmax = df.Max<double>(clab).GetValue();
         double plabmin = df.Min<double>(plab).GetValue();
         double plabmax = df.Max<double>(plab).GetValue();
+
+        double cGJmin = 0;
+        double cGJmax = 0;
+        double pGJmin = 0;
+        double pGJmax = 0;
+        double cHmin = 0;
+        double cHmax = 0;
+        double pHmin = 0;
+        double pHmax = 0;
+
+        if (m != finalState)
+        {
+            cGJmin = df.Min<double>(cGJ).GetValue();
+            cGJmax = df.Max<double>(cGJ).GetValue();
+            pGJmin = df.Min<double>(pGJ).GetValue();
+            pGJmax = df.Max<double>(pGJ).GetValue();
+            cHmin = df.Min<double>(cH).GetValue();
+            cHmax = df.Max<double>(cH).GetValue();
+            pHmin = df.Min<double>(pH).GetValue();
+            pHmax = df.Max<double>(pH).GetValue();
+        }
+        // auto data_cGJ = df.Take<double>(cGJ).GetValue();
+        // auto data_pGJ = df.Take<double>(pGJ).GetValue();
+        // auto data_cH = df.Take<double>(cH).GetValue();
+        // auto data_pH = df.Take<double>(pH).GetValue();
 
         size_t bm = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_m));
         size_t ba = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_a));
@@ -278,49 +306,25 @@ int main(int argc, char **argv)
         ofs << makeHisto2D(mass, plab, bm, xmin, xmax, ba, plabmin, plabmax, xtitle, ytitle,
                            showErrors, dfName);
         totalPlots++;
-    }
-    {
-        string m = "PiPlus_PiMinus1_Photon1_Photon2";
-        string mass = "mass_" + m;
-        string cGJ = "costh_GJ_" + m, pGJ = "phi_GJ_" + m, cH = "costh_H_" + m, pH = "phi_H_" + m;
-        string dfName = "df";
-        double xmin = df.Min<double>(mass).GetValue();
-        double xmax = df.Max<double>(mass).GetValue();
-        double cGJmin = df.Min<double>(cGJ).GetValue();
-        double cGJmax = df.Max<double>(cGJ).GetValue();
-        double pGJmin = df.Min<double>(pGJ).GetValue();
-        double pGJmax = df.Max<double>(pGJ).GetValue();
-        double cHmin = df.Min<double>(cH).GetValue();
-        double cHmax = df.Max<double>(cH).GetValue();
-        double pHmin = df.Min<double>(pH).GetValue();
-        double pHmax = df.Max<double>(pH).GetValue();
-
-        // auto data_m = df.Take<double>(mass).GetValue();
-        auto data_cGJ = df.Take<double>(cGJ).GetValue();
-        auto data_pGJ = df.Take<double>(pGJ).GetValue();
-        auto data_cH = df.Take<double>(cH).GetValue();
-        auto data_pH = df.Take<double>(pH).GetValue();
-        size_t bm = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_m));
-        size_t ba = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_a));
-
-        string xtitle = "Mass[" + particleNameToLatex(mass) + "] (GeV)";
-        string ytitle = "";
-        ytitle = particleNameToLatex(cGJ);
-        ofs << makeHisto2D(mass, cGJ, bm, xmin, xmax, ba, cGJmin, cGJmax, xtitle, ytitle,
-                           showErrors, dfName);
-        totalPlots++;
-        ytitle = particleNameToLatex(pGJ);
-        ofs << makeHisto2D(mass, pGJ, bm, xmin, xmax, ba, pGJmin, pGJmax, xtitle, ytitle,
-                           showErrors, dfName);
-        totalPlots++;
-        ytitle = particleNameToLatex(cH);
-        ofs << makeHisto2D(mass, cH, bm, xmin, xmax, ba, cHmin, cHmax, xtitle, ytitle, showErrors,
-                           dfName);
-        totalPlots++;
-        ytitle = particleNameToLatex(pH);
-        ofs << makeHisto2D(mass, pH, bm, xmin, xmax, ba, pHmin, pHmax, xtitle, ytitle, showErrors,
-                           dfName);
-        totalPlots++;
+        if (m != finalState)
+        {
+            ytitle = particleNameToLatex(cGJ);
+            ofs << makeHisto2D(mass, cGJ, bm, xmin, xmax, ba, cGJmin, cGJmax, xtitle, ytitle,
+                               showErrors, dfName);
+            totalPlots++;
+            ytitle = particleNameToLatex(pGJ);
+            ofs << makeHisto2D(mass, pGJ, bm, xmin, xmax, ba, pGJmin, pGJmax, xtitle, ytitle,
+                               showErrors, dfName);
+            totalPlots++;
+            ytitle = particleNameToLatex(cH);
+            ofs << makeHisto2D(mass, cH, bm, xmin, xmax, ba, cHmin, cHmax, xtitle, ytitle,
+                               showErrors, dfName);
+            totalPlots++;
+            ytitle = particleNameToLatex(pH);
+            ofs << makeHisto2D(mass, pH, bm, xmin, xmax, ba, pHmin, pHmax, xtitle, ytitle,
+                               showErrors, dfName);
+            totalPlots++;
+        }
     }
 
     std::cout << "Creating 2D Mass Correlation Plots..." << std::endl;
