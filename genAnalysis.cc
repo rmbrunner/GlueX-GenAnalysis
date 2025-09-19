@@ -1,24 +1,18 @@
-// CodeGen.cc
-// This program generates a C++ analysis file (e.g. AnalyzeD.cc) based on
-// ROOT RDataFrame and a list of selected branches in selectedBranches.csv.
-// It inspects an input ROOT file, computes histogram ranges and bin widths,
-// and writes out code that uses RDataFrame to create 1D and 2D histograms
-
-// (including Dalitz plots) with LaTeX axes, error bars, and optimized
-// bins.
-
-// #include "KnuthWidth.h"
 #include <ROOT/RDataFrame.hxx>
-#include <TCanvas.h>
+#include <TF1.h>
 #include <TFile.h>
+#include <TH1D.h>
+#include <TH2D.h>
 #include <TKey.h>
-#include <TLegend.h>
+#include <TString.h>
 #include <TTree.h>
-#include <cstddef>
+
+#include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
-#include <ostream>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -26,333 +20,506 @@
 #include <vector>
 
 using namespace ROOT;
-using std::map;
 using std::string;
 using std::vector;
 
-static std::vector<std::string> splitTokens(const std::string &s)
+// ----------------------------- USER CONFIGURATION (edit here) -----------------------------
+static const int NUM_THREADS = 8; // 0 => ROOT decides
+
+struct NamedFilter
 {
-    std::vector<std::string> toks;
-    std::stringstream ss(s);
-    std::string item;
-    while (std::getline(ss, item, '_'))
-    {
-        toks.push_back(item);
-    }
-    return toks;
-}
+    std::string name;
+    std::string expr;
+    bool enabled;
+};
+static const NamedFilter DEFAULT_FILTERS[] = {
+  //{"name", "expression", bool},
+    {"candidate pt", "pt > 0.5", true},
+    {"candidate eta", "fabs(eta) < 2.5", true},
+    {"vertex chi2", "vtx_chi2 < 10", true},
+    {"flight significance", "l_xy / l_xy_err > 3", false}};
 
-string particleNameToLatex(const string &branch)
+// Resonance groups: name -> vector of tokens to match in mass_<tokens...> branch
+static const std::pair<std::string, std::vector<std::string>> RESONANCE_GROUPS[] = {
+    {"omega", {"PiPlus", "PiMinus1", "Photon1", "Photon2"}}, {"Lambda", {"Proton", "PiMinus2"}}};
+
+// sideband geometry (in sigmas)
+static const double SIG_NSIGMA = 2.0;
+static const bool ENABLE_SIDEBAND_SUBTRACTION = true;
+// -------------------------------------------------------------------------------------------
+
+// LaTeX particle names helper
+static std::string particleNameToLatex(const std::string &branch)
 {
-    static const map<string, string> particleMap = {
-        {"PiMinus", "#pi^{-}"}, {"PiPlus", "#pi^{+}"},  {"KMinus", "K^{-}"},
-        {"KPlus", "K^{+}"},     {"Proton", "p"},        {"AntiProton", "#bar{p}"},
-        {"Neutron", "n"},       {"Electron", "e^{-}"},  {"Positron", "e^{+}"},
-        {"Photon", "#gamma"},   {"KShort", "K^{0}_{S}"}};
+    static const std::map<std::string, std::string> particleMap = {
+        {"PiMinus", "#pi^{-}"},    {"PiPlus", "#pi^{+}"}, {"Pi0", "#pi^{0}"},
+        {"KMinus", "K^{-}"},       {"KPlus", "K^{+}"},    {"Proton", "p"},
+        {"AntiProton", "#bar{p}"}, {"Neutron", "n"},      {"Electron", "e^{-}"},
+        {"Positron", "e^{+}"},     {"Photon", "#gamma"},  {"KShort", "K^{0}_{S}"}};
 
-    string s = branch;
-    if (s.rfind("mass_", 0) == 0)
+    std::string s = branch;
+    const std::string prefix = "mass_";
+    if (s.rfind(prefix, 0) == 0)
     {
-        s = s.substr(5);
+        s = s.substr(prefix.size());
     }
 
     std::stringstream ss(s);
-    string segment;
-    vector<string> particles;
-    while (std::getline(ss, segment, '_'))
+    std::string seg;
+    std::vector<std::string> parts;
+    while (std::getline(ss, seg, '_'))
     {
-        std::regex re("([A-Za-z]+)([0-9]*)$");
-        std::smatch match;
-        if (std::regex_match(segment, match, re))
+        if (seg.empty())
         {
-            string base = match[1];
-            string index = match[2];
+            continue;
+        }
+        std::regex re("([A-Za-z]+)([0-9]*)$");
+        std::smatch m;
+        if (std::regex_match(seg, m, re))
+        {
+            std::string base = m[1];
+            std::string idx = m[2];
             auto it = particleMap.find(base);
-            string latex = (it != particleMap.end()) ? it->second : base;
-            if (!index.empty())
+            std::string latex = (it != particleMap.end()) ? it->second : base;
+            if (!idx.empty())
             {
-                latex += "_{" + index + "}";
+                latex += "_{" + idx + "}";
             }
-            particles.push_back(latex);
+            parts.push_back(latex);
+        }
+        else
+        {
+            parts.push_back(seg);
         }
     }
-    string joined;
-    for (size_t i = 0; i < particles.size(); ++i)
+    std::string joined;
+    for (size_t i = 0; i < parts.size(); ++i)
     {
         if (i)
         {
             joined += " ";
         }
-        joined += particles[i];
+        joined += parts[i];
     }
     return joined;
 }
 
-string makeHisto1D(const string &b, size_t bins, double min, double max, bool showErrors)
+// small helpers
+static std::vector<std::string> splitTokens(const std::string &s)
 {
-    std::ostringstream out;
-    double binWidth = static_cast<int>(1000 * ((max - min) / bins));
-    string histName = "h1_" + b;
-    string title = "Mass[" + particleNameToLatex(b) + "] (GeV)";
-    out << "  auto " << histName << " = df.Histo1D({\"" << histName << "\",\""
-        << "" << "\"," << bins << "," << min << "," << max << "}, \"" << b << "\");\n";
-    out << histName << "->GetXaxis()->SetTitle(\"" << title << "\");" << std::endl;
-    out << histName << "->GetYaxis()->SetTitle(\"Counts / " << binWidth << " MeV\");" << std::endl;
-    out << histName << "->Write();\n";
-    out << "progress++;\n";
-    out << "std::cout << \"\\r\" << \"Progress: \" << progress << \"/\" << total << std::flush;\n";
-
-    // if (!showErrors)
-    // out << "  " << histName << "->SetErrorOption(\"\");\n";
-    return out.str();
+    std::vector<std::string> out;
+    std::stringstream ss(s);
+    string t;
+    while (std::getline(ss, t, '_'))
+    {
+        if (!t.empty())
+        {
+            out.push_back(t);
+        }
+    }
+    return out;
 }
 
-string makeHisto2D(const string &x, const string &y, size_t bx, double xmin, double xmax, size_t by,
-                   double ymin, double ymax, const string &xlabel, const string &ylabel,
-                   bool showErrors, string dfName)
+// Estimate peak and sigma from vector (gaussian fit fallback to mean/RMS)
+static std::pair<double, double> estimatePeakAndSigmaFromVec(const vector<double> &vec,
+                                                             int nbins = 400)
 {
-    std::ostringstream out;
-    string histName = "h2_" + x + "_" + y;
-    string title = xlabel + " vs. " + ylabel;
-    out << "  auto " << histName << " = " << dfName << ".Histo2D({\"" << histName << "\",\"" << ""
-        << "\"," << bx << "," << xmin << "," << xmax << "," << by << "," << ymin << "," << ymax
-        << "}, \"" << x << "\", \"" << y << "\");\n";
-    out << histName << "->GetXaxis()->SetTitle(\"" << xlabel << "\");" << std::endl;
-    out << histName << "->GetYaxis()->SetTitle(\"" << ylabel << "\");" << std::endl;
-    out << histName << "->Write();\n";
-    out << "progress++;\n";
-    out << "std::cout << \"\\r\" << \"Progress: \" << progress << \"/\" << total << std::flush;\n";
-    // if (!showErrors)
-    // out << "  " << histName << "->SetErrorOption(\"\");\n";
-    return out.str();
+    if (vec.empty())
+    {
+        return {0., 0.};
+    }
+    double xmin = 1e300, xmax = -1e300;
+    for (double v : vec)
+    {
+        if (std::isfinite(v))
+        {
+            xmin = std::min(xmin, v);
+            xmax = std::max(xmax, v);
+        }
+    }
+    if (!(xmin < xmax))
+    {
+        return {0., 0.};
+    }
+    TH1D htmp("htmp", "", nbins, xmin, xmax);
+    for (double v : vec)
+    {
+        if (std::isfinite(v))
+        {
+            htmp.Fill(v);
+        }
+    }
+    int imax = htmp.GetMaximumBin();
+    double peak = htmp.GetBinCenter(imax);
+    double fullRange = xmax - xmin;
+    double window = std::max(0.03, 0.05 * fullRange);
+    double fitLow = std::max(xmin, peak - window);
+    double fitHigh = std::min(xmax, peak + window);
+    TF1 f("fgaus", "gaus", fitLow, fitHigh);
+    int fitStatus = 1;
+    try
+    {
+        fitStatus = htmp.Fit(&f, "QRS", "", fitLow, fitHigh);
+    }
+    catch (...)
+    {
+        fitStatus = 1;
+    }
+    double mean = 0., sigma = 0.;
+    if (fitStatus == 0 || f.GetNpar() >= 3)
+    {
+        mean = f.GetParameter(1);
+        sigma = fabs(f.GetParameter(2));
+        if (!(sigma > 0) || !(mean > xmin && mean < xmax))
+        {
+            mean = htmp.GetMean();
+            sigma = htmp.GetRMS();
+        }
+    }
+    else
+    {
+        mean = htmp.GetMean();
+        sigma = htmp.GetRMS();
+    }
+    return {mean, sigma};
 }
 
 int main(int argc, char **argv)
 {
-    if (argc < 4)
+    // implicit MT
+    if (NUM_THREADS > 0)
+    {
+        ROOT::EnableImplicitMT(NUM_THREADS);
+        std::cout << "[INFO] Threads requested: " << NUM_THREADS << "\n";
+    }
+    else
+    {
+        ROOT::EnableImplicitMT();
+        std::cout << "[INFO] ROOT decides threads\n";
+    }
+
+    if (argc < 3)
     {
         std::cerr << "Usage: " << argv[0]
-                  << " <input.root> <selectedBranches.csv> <output.cc> [showErrors=0]\n";
+                  << " <files*|comma-separated-files> <selectedBranches.csv> ";
+        // "[showErrors=0]\n";
         return 1;
     }
-    string inputFile = argv[1];
 
-    string csvFile = argv[2];
-    string outFile = argv[3];
-    bool showErrors = (argc > 4 ? std::stoi(argv[4]) : 0);
-    size_t totalPlots = 0;
+    std::string filespec = argv[1];
+    std::string csvFile = argv[2];
+    // bool showErrors = (argc > 3 ? std::stoi(argv[3]) != 0 : false);
 
+    // read selected branches csv
     std::ifstream ifs(csvFile);
-    vector<TString> sel;
-    std::string line;
-    // read in and sanitize combo names
+    if (!ifs.is_open())
+    {
+        std::cerr << "ERROR: cannot open CSV: " << csvFile << "\n";
+        return 1;
+    }
+    vector<string> sel;
+    string line;
     string finalState;
     while (std::getline(ifs, line))
     {
-        if (!line.empty())
+        if (line.empty())
         {
-            line.erase(line.find_last_not_of(" \n\r\t") + 1);
-            sel.push_back(line);
-            finalState = line;
+            continue;
         }
+        line.erase(line.find_last_not_of(" \n\r\t") + 1);
+        sel.push_back(line);
+        finalState = line;
     }
-
-    TFile *f = TFile::Open(inputFile.c_str(), "READ");
-    if (!f || f->IsZombie())
+    ifs.close();
+    if (sel.empty())
     {
-        std::cerr << "ERROR: Cannot open file " << inputFile << "\n";
+        std::cerr << "ERROR: CSV empty\n";
         return 1;
     }
-    TIter itKey(f->GetListOfKeys());
+
+    // determine TTree name from first file
+    std::vector<std::string> fileVec;
+    bool passVectorToRDF = false;
+    if (filespec.find(',') != string::npos)
+    {
+        // split comma-separated into vector and pass vector
+        std::stringstream ss(filespec);
+        string token;
+        while (std::getline(ss, token, ','))
+        {
+            token.erase(0, token.find_first_not_of(" \t\r\n"));
+            token.erase(token.find_last_not_of(" \t\r\n") + 1);
+            if (!token.empty())
+            {
+                fileVec.push_back(token);
+            }
+        }
+        if (fileVec.empty())
+        {
+            std::cerr << "ERROR: no file names parsed from comma-list\n";
+            return 1;
+        }
+        passVectorToRDF = true;
+    }
+
+    // find tree name from first real root file
+    std::string firstFile = passVectorToRDF ? fileVec.front() : filespec;
+    TFile *tf0 = TFile::Open(firstFile.c_str(), "READ");
+    if (!tf0 || tf0->IsZombie())
+    {
+        std::cerr << "ERROR: cannot open " << firstFile << "\n";
+        return 1;
+    }
+    std::string treeName;
+    TIter itKey(tf0->GetListOfKeys());
     TKey *key;
-    string treeName;
     while ((key = (TKey *)itKey()))
     {
-        if (std::string(key->GetClassName()) == "TTree")
+        TString cn = key->GetClassName();
+        if (std::string(cn.Data()) == "TTree")
         {
             treeName = key->GetName();
             break;
         }
     }
+    tf0->Close();
     if (treeName.empty())
     {
-        std::cerr << "ERROR: No TTree found in file.\n";
+        std::cerr << "ERROR: no TTree found in file.\n";
         return 1;
     }
+    std::cout << "[INFO] Using tree: " << treeName << "\n";
 
-    RDataFrame df(treeName, inputFile);
+    // Build RDataFrame using ROOT-native file handling:
+    // - if we collected a vector (from a globbed path or comma-list) pass the vector;
+    // - otherwise pass the filespec string (may contain wildcard like file_*.root)
+    RDataFrame df =
+        passVectorToRDF ? RDataFrame(treeName, fileVec) : RDataFrame(treeName, filespec);
+
+    // collect mass_* columns that match selected CSV combos; fallback to all mass_*
     auto allCols = df.GetColumnNames();
-
     vector<string> cols;
-    for (const auto &b : allCols)
+    for (const auto &c : allCols)
     {
-        string stripped = b;
-        const string prefix = "mass_";
-        if (stripped.rfind(prefix, 0) == 0)
+        TString tc = c;
+        std::string s = std::string(tc.Data());
+        const std::string prefix = "mass_";
+        std::string stripped = s;
+        if (s.rfind(prefix, 0) == 0)
         {
-            stripped = stripped.substr(prefix.size());
+            stripped = s.substr(prefix.size());
         }
-        TString tmp = stripped;
-        for (auto &i : sel)
+        for (auto &t : sel)
         {
-            TString thing = i;
-
-            if (i == tmp)
+            if (stripped == t)
             {
-                cols.push_back(b);
+                cols.push_back(s);
                 break;
             }
         }
     }
-
-    std::ofstream ofs(outFile);
-
-    ofs << "#include <ROOT/RDataFrame.hxx>\n"
-        << "#include <TFile.h>\n"
-        << "#include <TCanvas.h>\n"
-        << "#include <TKey.h>\n"
-        << "#include <TGaxis.h>\n"
-        << "#include <string>\n"
-        << "using namespace ROOT;\n"
-        << "void plots(){\n"
-        << "  TFile *f = TFile::Open(\"" << inputFile << "\", \"READ\");\n"
-        << "  if (!f || f->IsZombie()) throw std::runtime_error(\"Cannot open "
-           "\\\" "
-        << inputFile << "\\\"\");\n"
-        << "  TIter itKey(f->GetListOfKeys()); TKey *key; std::string tree;\n"
-        << "  while ((key = (TKey*)itKey())) {\n    if "
-           "(std::string(key->GetClassName()) == \"TTree\") { tree = "
-           "key->GetName(); break; }\n  }\n"
-        << "  if (tree.empty()) throw std::runtime_error(\"No TTree\");\n"
-        << "  auto df = RDataFrame(tree, \"" << inputFile << "\");\n"
-        << "TFile* histograms =TFile::Open(\"histograms.root\", \"RECREATE\"); \n"
-        << "std::ifstream totalplots(\"totalPlots.txt\");\n"
-        << "std::string total;\n"
-        << "std::getline(totalplots,total);\n"
-        << "size_t numplots = std::stoul(total);\n"
-        << "size_t progress = 0;\n"
-        << "histograms->cd();\n";
-
-    std::cout << "Creating 1D Histograms..." << std::endl;
-
-    for (auto &b : cols)
+    if (cols.empty())
     {
-        double minv = df.Min<double>(b).GetValue();
-        double maxv = df.Max<double>(b).GetValue();
-        auto data_b = df.Take<double>(b).GetValue();
-        size_t bins1 = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_b));
-        ofs << makeHisto1D(b, bins1, minv, maxv, showErrors);
-        totalPlots++;
-    }
-
-    std::cout << "Creating Angular Distribution Plots..." << std::endl;
-    for (auto &m : cols)
-    {
-        // only match if mass column is for the same particle
-        string mass = m;
-        const string prefix = "mass_";
-        if (m.rfind(prefix, 0) == 0)
+        for (const auto &c : allCols)
         {
-            m = m.substr(prefix.size());
-        }
-        string costh = "costh_";
-        string phi = "phi_";
-        string dfName = "df";
-        string clab = costh + "lab_" + m, plab = phi + "lab_" + m;
-        string cGJ = "costh_GJ_" + m, pGJ = "phi_GJ_" + m, cH = "costh_H_" + m, pH = "phi_H_" + m;
-
-        double xmin = df.Min<double>(mass).GetValue();
-        double xmax = df.Max<double>(mass).GetValue();
-        double clabmin = df.Min<double>(clab).GetValue();
-        double clabmax = df.Max<double>(clab).GetValue();
-        double plabmin = df.Min<double>(plab).GetValue();
-        double plabmax = df.Max<double>(plab).GetValue();
-
-        double cGJmin = 0;
-        double cGJmax = 0;
-        double pGJmin = 0;
-        double pGJmax = 0;
-        double cHmin = 0;
-        double cHmax = 0;
-        double pHmin = 0;
-        double pHmax = 0;
-
-        if (m != finalState)
-        {
-            cGJmin = df.Min<double>(cGJ).GetValue();
-            cGJmax = df.Max<double>(cGJ).GetValue();
-            pGJmin = df.Min<double>(pGJ).GetValue();
-            pGJmax = df.Max<double>(pGJ).GetValue();
-            cHmin = df.Min<double>(cH).GetValue();
-            cHmax = df.Max<double>(cH).GetValue();
-            pHmin = df.Min<double>(pH).GetValue();
-            pHmax = df.Max<double>(pH).GetValue();
-        }
-        // auto data_cGJ = df.Take<double>(cGJ).GetValue();
-        // auto data_pGJ = df.Take<double>(pGJ).GetValue();
-        // auto data_cH = df.Take<double>(cH).GetValue();
-        // auto data_pH = df.Take<double>(pH).GetValue();
-
-        size_t bm = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_m));
-        size_t ba = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_a));
-
-        string xtitle = "Mass[" + particleNameToLatex(mass) + "] (GeV)";
-        string ytitle = "";
-        ytitle = particleNameToLatex(clab);
-        ofs << makeHisto2D(mass, clab, bm, xmin, xmax, ba, clabmin, clabmax, xtitle, ytitle,
-                           showErrors, dfName);
-        totalPlots++;
-        ytitle = particleNameToLatex(plab);
-        ofs << makeHisto2D(mass, plab, bm, xmin, xmax, ba, plabmin, plabmax, xtitle, ytitle,
-                           showErrors, dfName);
-        totalPlots++;
-        if (m != finalState)
-        {
-            ytitle = particleNameToLatex(cGJ);
-            ofs << makeHisto2D(mass, cGJ, bm, xmin, xmax, ba, cGJmin, cGJmax, xtitle, ytitle,
-                               showErrors, dfName);
-            totalPlots++;
-            ytitle = particleNameToLatex(pGJ);
-            ofs << makeHisto2D(mass, pGJ, bm, xmin, xmax, ba, pGJmin, pGJmax, xtitle, ytitle,
-                               showErrors, dfName);
-            totalPlots++;
-            ytitle = particleNameToLatex(cH);
-            ofs << makeHisto2D(mass, cH, bm, xmin, xmax, ba, cHmin, cHmax, xtitle, ytitle,
-                               showErrors, dfName);
-            totalPlots++;
-            ytitle = particleNameToLatex(pH);
-            ofs << makeHisto2D(mass, pH, bm, xmin, xmax, ba, pHmin, pHmax, xtitle, ytitle,
-                               showErrors, dfName);
-            totalPlots++;
+            TString tc = c;
+            std::string s = std::string(tc.Data());
+            if (s.rfind("mass_", 0) == 0)
+            {
+                cols.push_back(s);
+            }
         }
     }
+    if (cols.empty())
+    {
+        std::cerr << "ERROR: no mass_* columns found\n";
+        return 1;
+    }
 
-    std::cout << "Creating 2D Mass Correlation Plots..." << std::endl;
+    // build combined preselection
+    std::string combinedSel;
+    for (const auto &nf : DEFAULT_FILTERS)
+    {
+        if (!nf.enabled)
+        {
+            continue;
+        }
+        if (!combinedSel.empty())
+        {
+            combinedSel += " && ";
+        }
+        combinedSel += "(" + nf.expr + ")";
+    }
+    if (!combinedSel.empty())
+    {
+        std::cout << "[INFO] Preselection: " << combinedSel << "\n";
+    }
+    else
+    {
+        std::cout << "[INFO] No preselection\n";
+    }
+
+    ROOT::RDF::RNode df_pre = df;
+    if (!combinedSel.empty())
+    {
+        df_pre = df_pre.Filter(combinedSel.c_str(), "preselection");
+    }
+
+    // pre-no-mass node for sideband fitting (exclude any mass-based cuts if existed)
+    std::string nonMassSel;
+    for (const auto &nf : DEFAULT_FILTERS)
+    {
+        if (!nf.enabled)
+        {
+            continue;
+        }
+        if (nf.expr.find("mass_") != std::string::npos)
+        {
+            continue;
+        }
+        if (!nonMassSel.empty())
+        {
+            nonMassSel += " && ";
+        }
+        nonMassSel += "(" + nf.expr + ")";
+    }
+    ROOT::RDF::RNode df_pre_noMass = df;
+    if (!nonMassSel.empty())
+    {
+        df_pre_noMass = df_pre_noMass.Filter(nonMassSel.c_str(), "pre_no_mass");
+    }
+
+    // auto-detect resonance groups (generalized)
+    std::map<std::string, std::string> detectedMassByGroup;
+    std::map<std::string, std::pair<double, double>> meanSigmaByGroup;
+    for (const auto &rg : RESONANCE_GROUPS)
+    {
+        const std::string &gname = rg.first;
+        const auto &tokensWanted = rg.second;
+        std::string found;
+        for (const auto &c : cols)
+        {
+            auto toks = splitTokens(c);
+            bool ok = true;
+            for (auto &tw : tokensWanted)
+            {
+                bool f = false;
+                for (auto &t : toks)
+                {
+                    if (t.find(tw) != std::string::npos)
+                    {
+                        f = true;
+                        break;
+                    }
+                }
+                if (!f)
+                {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok)
+            {
+                found = c;
+                break;
+            }
+        }
+        if (!found.empty())
+        {
+            detectedMassByGroup[gname] = found;
+            auto vec = df_pre_noMass.Take<double>(found).GetValue();
+            auto ms = estimatePeakAndSigmaFromVec(vec);
+            meanSigmaByGroup[gname] = ms;
+            std::cout << "[AUTO] Group '" << gname << "' -> " << found << " (mean=" << ms.first
+                      << ", sigma=" << ms.second << ")\n";
+        }
+        else
+        {
+            std::cout << "[AUTO] Group '" << gname << "' not found\n";
+        }
+    }
+
+    // precompute sideband windows
+    struct SBWin
+    {
+        double sig_lo, sig_hi;
+        double sb1_lo, sb1_hi;
+        double sb2_lo, sb2_hi;
+    };
+    std::map<std::string, SBWin> sidebandWindows;
+    if (ENABLE_SIDEBAND_SUBTRACTION)
+    {
+        for (const auto &kv : meanSigmaByGroup)
+        {
+            const std::string &g = kv.first;
+            double mean = kv.second.first, sigma = kv.second.second;
+            if (!(sigma > 0 && std::isfinite(mean)))
+            {
+                continue;
+            }
+            double sig_lo = mean - SIG_NSIGMA * sigma, sig_hi = mean + SIG_NSIGMA * sigma;
+            double sb1_lo = mean - 2.0 * SIG_NSIGMA * sigma, sb1_hi = mean - SIG_NSIGMA * sigma;
+            double sb2_lo = mean + SIG_NSIGMA * sigma, sb2_hi = mean + 2.0 * SIG_NSIGMA * sigma;
+            sidebandWindows[g] = {sig_lo, sig_hi, sb1_lo, sb1_hi, sb2_lo, sb2_hi};
+            std::cout << "[SB] " << g << " sig=[" << sig_lo << "," << sig_hi << "] sb1=[" << sb1_lo
+                      << "," << sb1_hi << "] sb2=[" << sb2_lo << "," << sb2_hi << "]\n";
+        }
+    }
+
+    // compute totalPlots (must be exact)
+    size_t totalPlots = 0;
+    totalPlots += cols.size(); // 1D mass
+    auto preCols = df_pre.GetColumnNames();
+    auto hasPreCol = [&](const std::string &cname) -> bool {
+        for (const auto &cc : preCols)
+        {
+            TString t = cc;
+            if (std::string(t.Data()) == cname)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const auto &c : cols)
+    {
+        std::string ms = c;
+        if (ms.rfind("mass_", 0) == 0)
+        {
+            ms = ms.substr(5);
+        }
+        if (hasPreCol("costh_lab_" + ms))
+        {
+            totalPlots++;
+        }
+        if (hasPreCol("phi_lab_" + ms))
+        {
+            totalPlots++;
+        }
+        if (hasPreCol("costh_GJ_" + ms))
+        {
+            totalPlots++;
+        }
+        if (hasPreCol("phi_GJ_" + ms))
+        {
+            totalPlots++;
+        }
+        if (hasPreCol("costh_H_" + ms))
+        {
+            totalPlots++;
+        }
+        if (hasPreCol("phi_H_" + ms))
+        {
+            totalPlots++;
+        }
+    }
     for (size_t i = 0; i < cols.size(); ++i)
     {
         for (size_t j = i + 1; j < cols.size(); ++j)
         {
-            string dfName = "df";
-            string x = "mass_" + cols[i];
-            string y = "mass_" + cols[j];
-            double xmin = df.Min<double>(x).GetValue();
-            double xmax = df.Max<double>(x).GetValue();
-            double ymin = df.Min<double>(y).GetValue();
-            double ymax = df.Max<double>(y).GetValue();
-            auto data_x = df.Take<double>(x).GetValue();
-            auto data_y = df.Take<double>(y).GetValue();
-            size_t bx = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_x));
-            size_t by = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_y));
-            string xtitle = "Mass[" + particleNameToLatex(x) + "] (GeV)";
-            string ytitle = "Mass[" + particleNameToLatex(y) + "] (GeV)";
-            ofs << makeHisto2D(x, y, bx, xmin, xmax, by, ymin, ymax, xtitle, ytitle, showErrors,
-                               dfName);
             totalPlots++;
         }
     }
-
-    std::cout << "Creating 2D Dalitz Plots..." << std::endl;
-    size_t counter = 0;
     std::vector<std::vector<std::string>> tokens;
     tokens.reserve(cols.size());
     for (auto &c : cols)
@@ -372,51 +539,334 @@ int main(int argc, char **argv)
                     hasCommon = true;
                     break;
                 }
-                if (!hasCommon)
-                {
-                    continue;
-                }
             }
-            string b1 = "mass_" + cols[i], b2 = "mass_" + cols[j];
-            string sq1 = b1 + "_sq";
-            string sq2 = b2 + "_sq";
-            string dfName = "df2_" + std::to_string(counter);
-            ofs << "  auto df2_" << counter << " = df.Define(\"" << sq1
-                << "\",[](double x){return x*x;}, {\"" << b1 << "\"}).Define(\"" << sq2
-                << "\",[](double x){return x*x;}, {\"" << b2 << "\"});\n";
-            double min1 = df.Min<double>(b1).GetValue();
-            double max1 = df.Max<double>(b1).GetValue();
-            double min2 = df.Min<double>(b2).GetValue();
-            double max2 = df.Max<double>(b2).GetValue();
-            auto vec1 = df.Take<double>(b1).GetValue();
-            auto vec2 = df.Take<double>(b2).GetValue();
-            std::vector<double> sqx, sqy;
-            sqx.reserve(vec1.size());
-            sqy.reserve(vec2.size());
-            for (auto v : vec1)
+            if (hasCommon)
             {
-                sqx.push_back(v * v);
+                totalPlots++;
             }
-            for (auto v : vec2)
-            {
-                sqy.push_back(v * v);
-            }
-            size_t binsx = 104; // static_cast<size_t>(Knuth::computeNumberBins(sqx));
-            size_t binsy = 104; // static_cast<size_t>(Knuth::computeNumberBins(sqy));
-            string xtitle = "Mass[" + particleNameToLatex(b1) + "]^{2} (GeV^{2})";
-            string ytitle = "Mass[" + particleNameToLatex(b2) + "]^{2} (GeV^{2})";
-            ofs << makeHisto2D(sq1, sq2, binsx, min1 * min1, max1 * max1, binsy, min2 * min2,
-                               max2 * max2, xtitle, ytitle, showErrors, dfName);
-            counter++;
-            totalPlots++;
         }
     }
-    ofs << "std::cout << std::endl;";
+    {
+        std::ofstream ofs("totalPlots.txt");
+        if (!ofs.is_open())
+        {
+            std::cerr << "ERROR: cannot write totalPlots.txt\n";
+            return 1;
+        }
+        ofs << totalPlots;
+    }
+    std::cout << "[INFO] totalPlots=" << totalPlots << " (written to totalPlots.txt)\n";
 
-    ofs << "histograms->Close();\n";
-    ofs << "}";
+    // Create histograms using RNode::Histo methods for speed
+    TFile *fout = TFile::Open("histograms.root", "RECREATE");
+    if (!fout || fout->IsZombie())
+    {
+        std::cerr << "ERROR: cannot create histograms.root\n";
+        return 1;
+    }
+    fout->cd();
 
-    ofs.close();
-    ofs.open("totalPlots.txt");
-    ofs << totalPlots;
+    size_t progress = 0;
+
+    // 1D Mass histograms with RNode::Histo1D
+    for (const auto &col : cols)
+    {
+        // determine range
+        double xmin = 0., xmax = 1.;
+        try
+        {
+            xmin = df_pre.Min<double>(col).GetValue();
+            xmax = df_pre.Max<double>(col).GetValue();
+        }
+        catch (...)
+        {
+        }
+        if (!(xmin < xmax))
+        {
+            xmin = 0.;
+            xmax = 1.;
+        }
+        int nbins = 104;
+        std::string hname = "h1_" + col;
+        std::string title = "Mass[" + particleNameToLatex(col) + "] (GeV)";
+        // Using Histo1D on prefiltered RNode
+        auto r = df_pre.Histo1D({hname.c_str(), title.c_str(), nbins, xmin, xmax}, col);
+        // set axis title & y-title then write
+        r->GetXaxis()->SetTitle(title.c_str());
+        int bw = static_cast<int>(1000.0 * ((xmax - xmin) / nbins));
+        r->GetYaxis()->SetTitle(Form("Counts / %d MeV", bw));
+        r->Write();
+        progress++;
+        std::cout << "\rProgress: " << progress << "/" << totalPlots << std::flush;
+    }
+
+    // Angular 2D: use Histo2D on df_pre
+    preCols = df_pre.GetColumnNames();
+    auto hasCol = [&](const std::string &cname) -> bool {
+        for (const auto &cc : preCols)
+        {
+            TString t = cc;
+            if (std::string(t.Data()) == cname)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (const auto &m : cols)
+    {
+        std::string ms = m;
+        if (ms.rfind("mass_", 0) == 0)
+        {
+            ms = ms.substr(5);
+        }
+        std::string clab = "costh_lab_" + ms, plab = "phi_lab_" + ms;
+        std::string cGJ = "costh_GJ_" + ms, pGJ = "phi_GJ_" + ms, cH = "costh_H_" + ms,
+                    pH = "phi_H_" + ms;
+        double xmin = 0., xmax = 1.;
+        try
+        {
+            xmin = df_pre.Min<double>(m).GetValue();
+            xmax = df_pre.Max<double>(m).GetValue();
+        }
+        catch (...)
+        {
+        }
+        if (!(xmin < xmax))
+        {
+            xmin = 0.;
+            xmax = 1.;
+        }
+        int bx = 104, by = 104;
+
+        auto make2D = [&](const std::string &ycol) {
+            std::string name = "h2_" + m + "_" + ycol;
+            std::string title =
+                "Mass[" + particleNameToLatex(m) + "] vs " + particleNameToLatex(ycol);
+            // Use Histo2D on df_pre
+            auto r =
+                df_pre.Histo2D({name.c_str(), title.c_str(), bx, xmin, xmax, by, -1., 1.}, m, ycol);
+            // set nicer y-range & axis titles if possible (we cannot quickly get min/max for y
+            // without another RDF call)
+            r->GetXaxis()->SetTitle(("Mass[" + particleNameToLatex(m) + "] (GeV)").c_str());
+            r->GetYaxis()->SetTitle(particleNameToLatex(ycol).c_str());
+            r->Write();
+            progress++;
+            std::cout << "\rProgress: " << progress << "/" << totalPlots << std::flush;
+        };
+
+        if (hasCol(clab))
+        {
+            make2D(clab);
+        }
+        if (hasCol(plab))
+        {
+            make2D(plab);
+        }
+        if (hasCol(cGJ))
+        {
+            make2D(cGJ);
+        }
+        if (hasCol(pGJ))
+        {
+            make2D(pGJ);
+        }
+        if (hasCol(cH))
+        {
+            make2D(cH);
+        }
+        if (hasCol(pH))
+        {
+            make2D(pH);
+        }
+    }
+
+    // 2D mass correlations (and sideband subtraction using Histo2D)
+    for (size_t i = 0; i < cols.size(); ++i)
+    {
+        for (size_t j = i + 1; j < cols.size(); ++j)
+        {
+            std::string x = cols[i], y = cols[j];
+            double xmin = 0., xmax = 1., ymin = 0., ymax = 1.;
+            try
+            {
+                xmin = df_pre.Min<double>(x).GetValue();
+                xmax = df_pre.Max<double>(x).GetValue();
+            }
+            catch (...)
+            {
+            }
+            try
+            {
+                ymin = df_pre.Min<double>(y).GetValue();
+                ymax = df_pre.Max<double>(y).GetValue();
+            }
+            catch (...)
+            {
+            }
+            if (!(xmin < xmax))
+            {
+                xmin = 0.;
+                xmax = 1.;
+            }
+            if (!(ymin < ymax))
+            {
+                ymin = 0.;
+                ymax = 1.;
+            }
+            int bx = 104, by = 104;
+
+            bool didSB = false;
+            if (ENABLE_SIDEBAND_SUBTRACTION)
+            {
+                // find if x and y match two different detected resonance groups
+                std::string gx, gy;
+                for (const auto &kv : detectedMassByGroup)
+                {
+                    if (kv.second == x)
+                    {
+                        gx = kv.first;
+                    }
+                    if (kv.second == y)
+                    {
+                        gy = kv.first;
+                    }
+                }
+                if (!gx.empty() && !gy.empty() && gx != gy && sidebandWindows.count(gx) &&
+                    sidebandWindows.count(gy))
+                {
+                    // construct safe selection strings
+                    auto &wx = sidebandWindows[gx];
+                    auto &wy = sidebandWindows[gy];
+                    auto mk = [&](const std::string &branch, double lo, double hi) {
+                        std::ostringstream os;
+                        os << "(" << branch << " > " << std::setprecision(10) << lo << " && "
+                           << branch << " < " << std::setprecision(10) << hi << ")";
+                        return os.str();
+                    };
+                    std::string ss = "(" + mk(x, wx.sig_lo, wx.sig_hi) + " && " +
+                                     mk(y, wy.sig_lo, wy.sig_hi) + ")";
+                    std::string sb = "(" + mk(x, wx.sig_lo, wx.sig_hi) + " && (" +
+                                     mk(y, wy.sb1_lo, wy.sb1_hi) + " || " +
+                                     mk(y, wy.sb2_lo, wy.sb2_hi) + "))";
+                    std::string bs = "((" + mk(x, wx.sb1_lo, wx.sb1_hi) + " || " +
+                                     mk(x, wx.sb2_lo, wx.sb2_hi) + ") && " +
+                                     mk(y, wy.sig_lo, wy.sig_hi) + ")";
+                    std::string bb = "((" + mk(x, wx.sb1_lo, wx.sb1_hi) + " || " +
+                                     mk(x, wx.sb2_lo, wx.sb2_hi) + ") && (" +
+                                     mk(y, wy.sb1_lo, wy.sb1_hi) + " || " +
+                                     mk(y, wy.sb2_lo, wy.sb2_hi) + "))";
+
+                    // filter nodes and create Histo2D for each region
+                    auto node_ss = df_pre_noMass.Filter(ss.c_str(), "ss_node");
+                    auto node_sb = df_pre_noMass.Filter(sb.c_str(), "sb_node");
+                    auto node_bs = df_pre_noMass.Filter(bs.c_str(), "bs_node");
+                    auto node_bb = df_pre_noMass.Filter(bb.c_str(), "bb_node");
+
+                    std::string name_ss = "h_ss_" + x + "_" + y;
+                    std::string title = "ss(" + x + "," + y + ")";
+                    auto r_ss = node_ss.Histo2D(
+                        {name_ss.c_str(), title.c_str(), bx, xmin, xmax, by, ymin, ymax}, x, y);
+                    auto r_sb =
+                        node_sb.Histo2D({"h_sb_tmp", "sb", bx, xmin, xmax, by, ymin, ymax}, x, y);
+                    auto r_bs =
+                        node_bs.Histo2D({"h_bs_tmp", "bs", bx, xmin, xmax, by, ymin, ymax}, x, y);
+                    auto r_bb =
+                        node_bb.Histo2D({"h_bb_tmp", "bb", bx, xmin, xmax, by, ymin, ymax}, x, y);
+
+                    // force evaluation by using the hist pointers (operator-> triggers computation)
+                    TH2D *h_ss = r_ss.operator->(); // trigger
+                    TH2D *h_sb = r_sb.operator->();
+                    TH2D *h_bs = r_bs.operator->();
+                    TH2D *h_bb = r_bb.operator->();
+
+                    // clone and combine: out = ss - 0.5*sb - 0.5*bs + 0.25*bb
+                    std::string outName = "h2_sbsub_" + x + "_vs_" + y;
+                    TH2D *hout = (TH2D *)h_ss->Clone(outName.c_str());
+                    hout->Add(h_sb, -0.5);
+                    hout->Add(h_bs, -0.5);
+                    hout->Add(h_bb, 0.25);
+
+                    // label axes using LaTeX names
+                    hout->GetXaxis()->SetTitle(
+                        ("Mass[" + particleNameToLatex(x) + "] (GeV)").c_str());
+                    hout->GetYaxis()->SetTitle(
+                        ("Mass[" + particleNameToLatex(y) + "] (GeV)").c_str());
+                    hout->Write();
+
+                    // cleanup temporaries created by Histo2D (RDF owns them, but cloned hist
+                    // exists) Note: r_ss/r_sb/... are RResultPtr; their underlying histogram
+                    // objects are managed by RDF until program exit. We cloned h_ss into hout; we
+                    // don't need to delete the r_* histograms (RDF manages them), but we do delete
+                    // hout.
+                    delete hout;
+                    didSB = true;
+                    progress++;
+                    std::cout << "\rProgress: " << progress << "/" << totalPlots << std::flush;
+                }
+            }
+
+            if (!didSB)
+            {
+                // simple 2D using Histo2D on prefiltered df
+                std::string name = "h2_" + x + "_" + y;
+                std::string title =
+                    "Mass[" + particleNameToLatex(x) + "] vs Mass[" + particleNameToLatex(y) + "]";
+                auto r = df_pre.Histo2D(
+                    {name.c_str(), title.c_str(), bx, xmin, xmax, by, ymin, ymax}, x, y);
+                r->GetXaxis()->SetTitle(("Mass[" + particleNameToLatex(x) + "] (GeV)").c_str());
+                r->GetYaxis()->SetTitle(("Mass[" + particleNameToLatex(y) + "] (GeV)").c_str());
+                r->Write();
+                progress++;
+                std::cout << "\rProgress: " << progress << "/" << totalPlots << std::flush;
+            }
+        }
+    }
+
+    // Dalitz plots: m^2 vs m^2 for combos that share tokens
+    for (size_t i = 0; i < cols.size(); ++i)
+    {
+        std::unordered_set<std::string> set_i(tokens[i].begin(), tokens[i].end());
+        for (size_t j = i + 1; j < cols.size(); ++j)
+        {
+            bool hasCommon = false;
+            for (auto &t : tokens[j])
+            {
+                if (set_i.count(t))
+                {
+                    hasCommon = true;
+                    break;
+                }
+            }
+            if (!hasCommon)
+            {
+                continue;
+            }
+
+            std::string b1 = cols[i], b2 = cols[j];
+            std::string sq1 = b1 + "_sq", sq2 = b2 + "_sq";
+            // Define squares and histogram with Histo2D
+            auto node_sq = df.Define(sq1, [](double x) { return x * x; }, {b1})
+                               .Define(sq2, [](double x) { return x * x; }, {b2});
+            double min1 = node_sq.Min<double>(sq1).GetValue();
+            double max1 = node_sq.Max<double>(sq1).GetValue();
+            double min2 = node_sq.Min<double>(sq2).GetValue();
+            double max2 = node_sq.Max<double>(sq2).GetValue();
+            TString histname = "h2_" + sq1 + "_" + sq2;
+            auto r =
+                node_sq.Histo2D({histname, "dalitz", 104, min1, max1, 104, min2, max2}, sq1, sq2);
+            r->GetXaxis()->SetTitle(
+                ("Mass[" + particleNameToLatex(b1) + "]^{2} (GeV^{2})").c_str());
+            r->GetYaxis()->SetTitle(
+                ("Mass[" + particleNameToLatex(b2) + "]^{2} (GeV^{2})").c_str());
+            r->Write();
+            progress++;
+            std::cout << "\rProgress: " << progress << "/" << totalPlots << std::flush;
+        }
+    }
+
+    std::cout << "\nDone. Wrote histograms.root with " << progress << " histograms.\n";
+    fout->Close();
+    return 0;
 }
