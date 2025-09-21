@@ -136,6 +136,11 @@ int main(int argc, char **argv)
         return 1;
     }
     string inputFile = argv[1];
+    string cpy = inputFile;
+    std::size_t pos = cpy.rfind('_');
+    if (pos != std::string::npos) {
+        cpy.erase(pos);  // erase from '_' onwards
+    }
 
     string csvFile = argv[2];
     string outFile = argv[3];
@@ -224,7 +229,7 @@ int main(int argc, char **argv)
            "(std::string(key->GetClassName()) == \"TTree\") { tree = "
            "key->GetName(); break; }\n  }\n"
         << "  if (tree.empty()) throw std::runtime_error(\"No TTree\");\n"
-        << "  auto df = RDataFrame(tree, \"" << inputFile << "\");\n"
+        << "  auto df = RDataFrame(tree, \"" << cpy << "*.root\");\n"
         << "TFile* histograms =TFile::Open(\"histograms.root\", \"RECREATE\"); \n"
         << "std::ifstream totalplots(\"totalPlots.txt\");\n"
         << "std::string total;\n"
