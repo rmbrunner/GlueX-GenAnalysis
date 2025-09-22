@@ -663,7 +663,7 @@ int main(int argc, char **argv)
         double minv = df.Min<double>(b).GetValue();
         double maxv = df.Max<double>(b).GetValue();
         auto data_b = df.Take<double>(b).GetValue();
-        size_t bins1 = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_b));
+        size_t bins1 = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_b));
         string weightCol = "";
         auto it = branchToRes.find(b);
         if (it != branchToRes.end())
@@ -722,8 +722,8 @@ int main(int argc, char **argv)
             pHmax = df.Max<double>(pH).GetValue();
         }
 
-        size_t bm = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_m));
-        size_t ba = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_a));
+        size_t bm = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_m));
+        size_t ba = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_a));
 
         string xtitle = "Mass[" + particleNameToLatex(mass) + "] (GeV)";
         string ytitle = "";
@@ -770,8 +770,8 @@ int main(int argc, char **argv)
             double ymax = df.Max<double>(y).GetValue();
             auto data_x = df.Take<double>(x).GetValue();
             auto data_y = df.Take<double>(y).GetValue();
-            size_t bx = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_x));
-            size_t by = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_y));
+            size_t bx = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_x));
+            size_t by = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_y));
             string xtitle = "Mass[" + particleNameToLatex(x) + "] (GeV)";
             string ytitle = "Mass[" + particleNameToLatex(y) + "] (GeV)";
 
@@ -852,8 +852,8 @@ int main(int argc, char **argv)
             {
                 sqy.push_back(v * v);
             }
-            size_t binsx = 104; // static_cast<size_t>(Knuth::computeNumberBins(sqx));
-            size_t binsy = 104; // static_cast<size_t>(Knuth::computeNumberBins(sqy));
+            size_t binsx = 300; // static_cast<size_t>(Knuth::computeNumberBins(sqx));
+            size_t binsy = 300; // static_cast<size_t>(Knuth::computeNumberBins(sqy));
             string xtitle = "Mass[" + particleNameToLatex(b1) + "]^{2} (GeV^{2})";
             string ytitle = "Mass[" + particleNameToLatex(b2) + "]^{2} (GeV^{2})";
 
