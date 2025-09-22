@@ -216,7 +216,8 @@ int main(int argc, char **argv)
     if (argc < 4)
     {
         std::cerr << "Usage: " << argv[0]
-                  << " <input.root> <selectedBranches.csv> <output.cc> [showErrors=0]\n";
+                  << " <input.root> <selectedBranches.csv> <output.cc> [--fractal-sb|-f [levels]] "
+                     "[showErrors=0]\n";
         return 1;
     }
     string inputFile = argv[1];
@@ -229,7 +230,51 @@ int main(int argc, char **argv)
 
     string csvFile = argv[2];
     string outFile = argv[3];
-    bool showErrors = (argc > 4 ? std::stoi(argv[4]) : 0);
+
+    // parse optional args
+    bool fractalSB = false;
+    int sbLevels = 3; // default fractal depth
+    bool showErrors = false;
+
+    // scan remaining argv for our flags and showErrors (last)
+    for (int i = 4; i < argc; ++i)
+    {
+        string a = argv[i];
+        if (a == "--fractal-sb" || a == "-f")
+        {
+            fractalSB = true;
+            // check next arg if exists and is integer -> levels
+            if (i + 1 < argc)
+            {
+                // try parse integer
+                try
+                {
+                    int v = std::stoi(argv[i + 1]);
+                    if (v > 1)
+                    {
+                        sbLevels = v;
+                        ++i; // consume
+                    }
+                }
+                catch (...)
+                { /* not an integer; ignore */
+                }
+            }
+        }
+        else
+        {
+            // fallback: interpret as showErrors integer if it looks like one
+            try
+            {
+                int val = std::stoi(a);
+                showErrors = (val != 0);
+            }
+            catch (...)
+            { /* ignore unknown args */
+            }
+        }
+    }
+
     size_t totalPlots = 0;
 
     // ------------------------------
@@ -246,9 +291,10 @@ int main(int argc, char **argv)
     // ------------------------------
 
     // parameters controlling widths (you can change these defaults)
-    double n_sig = 2.0;    // signal window = mean +/- n_sig * sigma
-    double sb_inner = 3.0; // inner sideband boundary (in sigma)
-    double sb_outer = 5.0; // outer sideband boundary (in sigma)
+    double n_sig = 2.0; // signal window = mean +/- n_sig * sigma
+    double sb_inner =
+        3.0; // (kept for backward compatibility with previous single-sideband calculation)
+    double sb_outer = 5.0; // outermost sigma for sidebands
 
     std::ifstream ifs(csvFile);
     vector<TString> sel;
@@ -317,15 +363,23 @@ int main(int argc, char **argv)
     // -----------------------
     // For each resonance group, try to locate the corresponding mass branch
     // and compute mean & sigma (used to create signal/sideband windows).
+    // Also compute fractal-level boundaries & coefficients if fractalSB is enabled.
     // -----------------------
     struct SBBounds
     {
         std::string branch; // full branch name: e.g. mass_PiPlus_...
         double mean = NAN;
         double sigma = NAN;
+        // basic windows (for non-fractal, backward compat)
         double sig_lo = NAN, sig_hi = NAN;
         double left_lo = NAN, left_hi = NAN;
         double right_lo = NAN, right_hi = NAN;
+        // fractal: per-level inner/outer (levels count)
+        std::vector<double> level_inner; // positive distances in sigma: n_sig + ...
+        std::vector<double> level_outer;
+        std::vector<double> level_inner_val; // absolute mass values (mean - inner*sigma etc)
+        std::vector<double> level_outer_val;
+        std::vector<double> coeff; // coefficient per level
     };
 
     std::map<std::string, SBBounds> resonanceBounds; // key: resonance name (omega, Lambda)
@@ -383,12 +437,60 @@ int main(int argc, char **argv)
         b.right_lo = mean + sb_inner * sigma;
         b.right_hi = mean + sb_outer * sigma;
 
+        // Fractal setup if requested: create sbLevels nested rings from n_sig..sb_outer
+        if (fractalSB)
+        {
+            int L = std::max(2, sbLevels);
+            b.level_inner.resize(L);
+            b.level_outer.resize(L);
+            b.level_inner_val.resize(L);
+            b.level_outer_val.resize(L);
+            b.coeff.resize(L);
+            // compute level edges in sigma-units:
+            // level 0 = [0, n_sig]
+            // levels 1..L-1 split [n_sig, sb_outer] linearly
+            double range = std::max(0.0, sb_outer - n_sig);
+            double delta = (L > 1) ? (range / double(L - 1)) : 0.0;
+            for (int l = 0; l < L; ++l)
+            {
+                if (l == 0)
+                {
+                    b.level_inner[l] = 0.0;
+                    b.level_outer[l] = n_sig;
+                }
+                else
+                {
+                    b.level_inner[l] = n_sig + (l - 1) * delta;
+                    b.level_outer[l] = n_sig + (l)*delta;
+                }
+                // convert to absolute mass ranges (we'll use these numeric values directly in
+                // generated code)
+                b.level_inner_val[l] =
+                    mean - b.level_outer[l] * sigma; // left-most outer for lower bound
+                b.level_outer_val[l] =
+                    mean -
+                    b.level_inner[l] * sigma; // left-most inner for upper bound (for left side)
+                // coeff rule: pow(-0.5, level)
+                b.coeff[l] = std::pow(-0.5, l);
+            }
+        }
+
         resonanceBounds[rname] = b;
 
         std::cout << "Resonance '" << rname << "' -> branch " << branch << ": mean=" << mean
                   << " sigma=" << sigma << " sig[" << b.sig_lo << "," << b.sig_hi << "] "
                   << " Lsb[" << b.left_lo << "," << b.left_hi << "] Rsb[" << b.right_lo << ","
                   << b.right_hi << "]\n";
+
+        if (fractalSB)
+        {
+            std::cout << "  Fractal levels = " << (int)b.level_inner.size() << " coeffs: ";
+            for (double c : b.coeff)
+            {
+                std::cout << c << " ";
+            }
+            std::cout << "\n";
+        }
     }
 
     std::ofstream ofs(outFile);
@@ -428,7 +530,17 @@ int main(int argc, char **argv)
 
     // Print computed numeric windows into the generated macro as literals
     ofs << "  // ----------------------\n";
-    ofs << "  // Sideband windows computed by generator (numeric literals):\n";
+    if (!fractalSB)
+    {
+        ofs << "  // Sideband windows computed by generator (numeric literals) - classic 3x3 "
+               "style\n";
+    }
+    else
+    {
+        ofs << "  // Fractal sideband mode enabled. Numeric level boundaries & coefficients "
+               "below.\n";
+    }
+
     for (const auto &p : resonanceBounds)
     {
         const auto &r = p.first;
@@ -441,23 +553,92 @@ int main(int argc, char **argv)
         ofs << "  const double " << "res_" << r << "_left_lo = " << b.left_lo << ";\n";
         ofs << "  const double " << "res_" << r << "_left_hi = " << b.left_hi << ";\n";
         ofs << "  const double " << "res_" << r << "_right_lo = " << b.right_lo << ";\n";
-        ofs << "  const double " << "res_" << r << "_right_hi = " << b.right_hi << ";\n\n";
+        ofs << "  const double " << "res_" << r << "_right_hi = " << b.right_hi << ";\n";
+        if (fractalSB)
+        {
+            int L = (int)b.level_inner.size();
+            ofs << "  // fractal levels: " << L << "\n";
+            // print coefficients array
+            ofs << "  const int res_" << r << "_levels = " << L << ";\n";
+            ofs << "  const double res_" << r << "_coeffs[] = {";
+            for (int l = 0; l < L; ++l)
+            {
+                if (l)
+                {
+                    ofs << ", ";
+                }
+                ofs << b.coeff[l];
+            }
+            ofs << "};\n";
+            // print numeric boundaries for each level (we'll provide left and right pairs)
+            // We'll emit level boundaries in mass units for left and right symmetric check
+            for (int l = 0; l < L; ++l)
+            {
+                double left_lo = b.mean - b.level_outer[l] * b.sigma;
+                double left_hi = b.mean - b.level_inner[l] * b.sigma;
+                double right_lo = b.mean + b.level_inner[l] * b.sigma;
+                double right_hi = b.mean + b.level_outer[l] * b.sigma;
+                ofs << "  // level " << l << " boundaries (mass): left[" << left_lo << ","
+                    << left_hi << "] right[" << right_lo << "," << right_hi << "]\n";
+                ofs << "  const double res_" << r << "_lvl" << l << "_left_lo = " << left_lo
+                    << ";\n";
+                ofs << "  const double res_" << r << "_lvl" << l << "_left_hi = " << left_hi
+                    << ";\n";
+                ofs << "  const double res_" << r << "_lvl" << l << "_right_lo = " << right_lo
+                    << ";\n";
+                ofs << "  const double res_" << r << "_lvl" << l << "_right_hi = " << right_hi
+                    << ";\n";
+            }
+        }
+        ofs << "\n";
     }
     ofs << "  // ----------------------\n\n";
 
     // Create per-resonance 1D sideband weight columns in the generated macro
+    // If fractalSB is enabled, create weights using per-level coefficients.
     for (const auto &p : resonanceBounds)
     {
         const auto &r = p.first;
         const auto &b = p.second;
         string wname = "sb_w_" + r;
         ofs << "  // define 1D sideband weight for resonance '" << r << "'\n";
-        ofs << "  df = df.Define(\"" << wname << "\", [](double m){\n";
-        ofs << "    if (m >= " << b.sig_lo << " && m <= " << b.sig_hi << ") return 1.0;\n";
-        ofs << "    if ((m >= " << b.left_lo << " && m <= " << b.left_hi
-            << ") || (m >= " << b.right_lo << " && m <= " << b.right_hi << ")) return -0.5;\n";
-        ofs << "    return 0.0;\n";
-        ofs << "  }, {\"" << b.branch << "\"});\n\n";
+        if (!fractalSB)
+        {
+            ofs << "  df = df.Define(\"" << wname << "\", [](double m){\n";
+            ofs << "    if (m >= " << b.sig_lo << " && m <= " << b.sig_hi << ") return 1.0;\n";
+            ofs << "    if ((m >= " << b.left_lo << " && m <= " << b.left_hi
+                << ") || (m >= " << b.right_lo << " && m <= " << b.right_hi << ")) return -0.5;\n";
+            ofs << "    return 0.0;\n";
+            ofs << "  }, {\"" << b.branch << "\"});\n\n";
+        }
+        else
+        {
+            int L = (int)b.level_inner.size();
+            ofs << "  df = df.Define(\"" << wname << "\", [](double m){\n";
+            // check levels from 0..L-1
+            for (int l = 0; l < L; ++l)
+            {
+                // signal level 0 is symmetric between left and right
+                if (l == 0)
+                {
+                    ofs << "    if (m >= " << (b.mean - b.level_outer[0] * b.sigma)
+                        << " && m <= " << (b.mean + b.level_outer[0] * b.sigma) << ") return "
+                        << b.coeff[0] << ";\n";
+                }
+                else
+                {
+                    double left_lo = b.mean - b.level_outer[l] * b.sigma;
+                    double left_hi = b.mean - b.level_inner[l] * b.sigma;
+                    double right_lo = b.mean + b.level_inner[l] * b.sigma;
+                    double right_hi = b.mean + b.level_outer[l] * b.sigma;
+                    ofs << "    if ((m >= " << left_lo << " && m <= " << left_hi
+                        << ") || (m >= " << right_lo << " && m <= " << right_hi << ")) return "
+                        << b.coeff[l] << ";\n";
+                }
+            }
+            ofs << "    return 0.0;\n";
+            ofs << "  }, {\"" << b.branch << "\"});\n\n";
+        }
     }
 
     ofs << "TFile* histograms =TFile::Open(\"histograms.root\", \"RECREATE\"); \n"
@@ -609,6 +790,8 @@ int main(int argc, char **argv)
                 }
             }
 
+            // If both are resonances same one, use 1D weight; complex 2D combined weights will be
+            // defined for Dalitz below
             ofs << makeHisto2D(x, y, bx, xmin, xmax, by, ymin, ymax, xtitle, ytitle, showErrors,
                                dfName,
                                (res_x.empty() && res_y.empty()
@@ -692,7 +875,9 @@ int main(int argc, char **argv)
             string weightName = "";
             if (!r1.empty() && !r2.empty())
             {
+                // create combined weight name
                 weightName = "sb_w_" + r1 + "_" + r2;
+                // build the lambda with numeric literals for boundaries
                 const auto &A = resonanceBounds[r1];
                 const auto &B = resonanceBounds[r2];
 
@@ -700,20 +885,102 @@ int main(int argc, char **argv)
                     << "'\n";
                 ofs << "  " << dfName << " = " << dfName << ".Define(\"" << weightName
                     << "\", [](double m1, double m2){\n";
-                ofs << "    int r1 = 0; // 2=Sig, 1=Sideband, 0=Other\n";
-                ofs << "    if (m1 >= " << A.sig_lo << " && m1 <= " << A.sig_hi << ") r1 = 2;\n";
-                ofs << "    else if ((m1 >= " << A.left_lo << " && m1 <= " << A.left_hi
-                    << ") || (m1 >= " << A.right_lo << " && m1 <= " << A.right_hi
-                    << ")) r1 = 1;\n";
-                ofs << "    int r2 = 0;\n";
-                ofs << "    if (m2 >= " << B.sig_lo << " && m2 <= " << B.sig_hi << ") r2 = 2;\n";
-                ofs << "    else if ((m2 >= " << B.left_lo << " && m2 <= " << B.left_hi
-                    << ") || (m2 >= " << B.right_lo << " && m2 <= " << B.right_hi
-                    << ")) r2 = 1;\n";
-                ofs << "    if (r1 == 2 && r2 == 2) return 1.0;\n";
-                ofs << "    if ((r1 == 2 && r2 == 1) || (r1 == 1 && r2 == 2)) return -0.5;\n";
-                ofs << "    if (r1 == 1 && r2 == 1) return 0.25;\n";
-                ofs << "    return 0.0;\n";
+
+                if (!fractalSB)
+                {
+                    // original simple 3x3 logic
+                    ofs << "    int r1 = 0; // 2=Sig, 1=Sideband, 0=Other\n";
+                    ofs << "    if (m1 >= " << A.sig_lo << " && m1 <= " << A.sig_hi
+                        << ") r1 = 2;\n";
+                    ofs << "    else if ((m1 >= " << A.left_lo << " && m1 <= " << A.left_hi
+                        << ") || (m1 >= " << A.right_lo << " && m1 <= " << A.right_hi
+                        << ")) r1 = 1;\n";
+                    ofs << "    int r2 = 0;\n";
+                    ofs << "    if (m2 >= " << B.sig_lo << " && m2 <= " << B.sig_hi
+                        << ") r2 = 2;\n";
+                    ofs << "    else if ((m2 >= " << B.left_lo << " && m2 <= " << B.left_hi
+                        << ") || (m2 >= " << B.right_lo << " && m2 <= " << B.right_hi
+                        << ")) r2 = 1;\n";
+                    ofs << "    if (r1 == 2 && r2 == 2) return 1.0;\n";
+                    ofs << "    if ((r1 == 2 && r2 == 1) || (r1 == 1 && r2 == 2)) return -0.5;\n";
+                    ofs << "    if (r1 == 1 && r2 == 1) return 0.25;\n";
+                    ofs << "    return 0.0;\n";
+                }
+                else
+                {
+                    // fractal multi-level logic: compute level index for each axis and multiply
+                    // coefficients
+                    int LA = (int)A.level_inner.size();
+                    int LB = (int)B.level_inner.size();
+                    ofs << "    int lvl1 = -1;\n";
+                    // levels for axis1
+                    for (int l = 0; l < LA; ++l)
+                    {
+                        if (l == 0)
+                        {
+                            double lo = A.mean - A.level_outer[0] * A.sigma;
+                            double hi = A.mean + A.level_outer[0] * A.sigma;
+                            ofs << "    if (m1 >= " << lo << " && m1 <= " << hi << ") lvl1 = 0;\n";
+                        }
+                        else
+                        {
+                            double left_lo = A.mean - A.level_outer[l] * A.sigma;
+                            double left_hi = A.mean - A.level_inner[l] * A.sigma;
+                            double right_lo = A.mean + A.level_inner[l] * A.sigma;
+                            double right_hi = A.mean + A.level_outer[l] * A.sigma;
+                            ofs << "    if ((m1 >= " << left_lo << " && m1 <= " << left_hi
+                                << ") || (m1 >= " << right_lo << " && m1 <= " << right_hi
+                                << ")) lvl1 = " << l << ";\n";
+                        }
+                    }
+                    ofs << "    int lvl2 = -1;\n";
+                    // levels for axis2
+                    for (int l = 0; l < LB; ++l)
+                    {
+                        if (l == 0)
+                        {
+                            double lo = B.mean - B.level_outer[0] * B.sigma;
+                            double hi = B.mean + B.level_outer[0] * B.sigma;
+                            ofs << "    if (m2 >= " << lo << " && m2 <= " << hi << ") lvl2 = 0;\n";
+                        }
+                        else
+                        {
+                            double left_lo = B.mean - B.level_outer[l] * B.sigma;
+                            double left_hi = B.mean - B.level_inner[l] * B.sigma;
+                            double right_lo = B.mean + B.level_inner[l] * B.sigma;
+                            double right_hi = B.mean + B.level_outer[l] * B.sigma;
+                            ofs << "    if ((m2 >= " << left_lo << " && m2 <= " << left_hi
+                                << ") || (m2 >= " << right_lo << " && m2 <= " << right_hi
+                                << ")) lvl2 = " << l << ";\n";
+                        }
+                    }
+                    // now multiply coefficients if both levels found
+                    ofs << "    if (lvl1 < 0 || lvl2 < 0) return 0.0;\n";
+                    // create an array of coeffs inline for axis1 and axis2 (we'll simply hardcode
+                    // arrays)
+                    ofs << "    const double coeff1[] = {";
+                    for (int l = 0; l < LA; ++l)
+                    {
+                        if (l)
+                        {
+                            ofs << ", ";
+                        }
+                        ofs << A.coeff[l];
+                    }
+                    ofs << "};\n";
+                    ofs << "    const double coeff2[] = {";
+                    for (int l = 0; l < LB; ++l)
+                    {
+                        if (l)
+                        {
+                            ofs << ", ";
+                        }
+                        ofs << B.coeff[l];
+                    }
+                    ofs << "};\n";
+                    ofs << "    return coeff1[lvl1] * coeff2[lvl2];\n";
+                }
+
                 ofs << "  }, {\"" << b1 << "\", \"" << b2 << "\"});\n";
             }
 
