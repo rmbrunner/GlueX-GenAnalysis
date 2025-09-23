@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 using namespace ROOT;
@@ -26,6 +27,7 @@ using std::map;
 using std::string;
 using std::vector;
 
+// split tokens helper (used for Dalitz pairing logic)
 static std::vector<std::string> splitTokens(const std::string &s)
 {
     std::vector<std::string> toks;
@@ -36,6 +38,100 @@ static std::vector<std::string> splitTokens(const std::string &s)
         toks.push_back(item);
     }
     return toks;
+}
+
+// parse resonance argument string into vector of (name,suffix) pairs
+// arg format: name=suffix[,name2=suffix2,...]  (also accepts ":" as separator)
+static std::vector<std::pair<std::string, std::string>> parseResonanceArg(const std::string &arg)
+{
+    std::vector<std::pair<std::string, std::string>> out;
+    std::stringstream ss(arg);
+    std::string token;
+    while (std::getline(ss, token, ','))
+    {
+        if (token.empty())
+        {
+            continue;
+        }
+        // trim whitespace
+        auto l = token.find_first_not_of(" \t\n\r");
+        auto r = token.find_last_not_of(" \t\n\r");
+        if (l == std::string::npos)
+        {
+            continue;
+        }
+        token = token.substr(l, r - l + 1);
+        size_t eq = token.find('=');
+        if (eq == std::string::npos)
+        {
+            eq = token.find(':');
+        }
+        if (eq == std::string::npos)
+        {
+            std::cerr << "Warning: cannot parse resonance token '" << token
+                      << "'. Use name=suffix\n";
+            continue;
+        }
+        std::string name = token.substr(0, eq);
+        std::string suffix = token.substr(eq + 1);
+        // trim both
+        auto trim = [](std::string s) {
+            auto l = s.find_first_not_of(" \t\n\r");
+            if (l == std::string::npos)
+            {
+                return std::string();
+            }
+            auto r = s.find_last_not_of(" \t\n\r");
+            return s.substr(l, r - l + 1);
+        };
+        name = trim(name);
+        suffix = trim(suffix);
+        if (!name.empty() && !suffix.empty())
+        {
+            out.emplace_back(name, suffix);
+        }
+    }
+    return out;
+}
+
+// parse a resonance config file with lines like:
+// # comment
+// omega=PiPlus_PiMinus1_Photon1_Photon2
+// Lambda=PiMinus2_Proton
+// also accepts comma-separated pairs on a single line
+static std::vector<std::pair<std::string, std::string>> parseResonanceFile(const std::string &fname)
+{
+    std::vector<std::pair<std::string, std::string>> out;
+    std::ifstream ifs(fname);
+    if (!ifs)
+    {
+        std::cerr << "Error: cannot open resonance config file: " << fname << "\n";
+        return out;
+    }
+    std::string line;
+    while (std::getline(ifs, line))
+    {
+        // trim
+        auto l = line.find_first_not_of(" \t\n\r");
+        if (l == std::string::npos)
+        {
+            continue;
+        }
+        auto r = line.find_last_not_of(" \t\n\r");
+        std::string t = line.substr(l, r - l + 1);
+        if (t.empty())
+        {
+            continue;
+        }
+        if (t[0] == '#')
+        {
+            continue; // comment
+        }
+        // pass to parseResonanceArg so comma-separated tokens are handled too
+        auto parsed = parseResonanceArg(t);
+        out.insert(out.end(), parsed.begin(), parsed.end());
+    }
+    return out;
 }
 
 string particleNameToLatex(const string &branch)
@@ -216,8 +312,15 @@ int main(int argc, char **argv)
     if (argc < 4)
     {
         std::cerr << "Usage: " << argv[0]
-                  << " <input.root> <selectedBranches.csv> <output.cc> [--fractal-sb|-f [levels]] "
-                     "[showErrors=0]\n";
+                  << " <input.root> <selectedBranches.csv> <output.cc> [options]\n"
+                  << "Options:\n"
+                  << "  --res-config <file>           Resonance groups config file (preferred)\n"
+                  << "  -r, --resonances NAME=SUFFIX[,NAME2=SUFFIX2,...]   (inline, legacy)\n"
+                  << "  -f, --fractal-sb [NLEVELS]    Enable fractal sidebands (optional levels)\n"
+                  << "  --help                        Show this message\n"
+                  << "Example:\n"
+                  << "  " << argv[0]
+                  << " in.root sel.csv out.cc --res-config resonances.txt -f 4\n";
         return 1;
     }
     string inputFile = argv[1];
@@ -231,69 +334,107 @@ int main(int argc, char **argv)
     string csvFile = argv[2];
     string outFile = argv[3];
 
-    // parse optional args
+    // cli parse
     bool fractalSB = false;
     int sbLevels = 3; // default fractal depth
     bool showErrors = false;
+    std::vector<std::pair<std::string, std::string>> RESONANCE_GROUPS_CLI;
 
-    // scan remaining argv for our flags and showErrors (last)
     for (int i = 4; i < argc; ++i)
     {
         string a = argv[i];
-        if (a == "--fractal-sb" || a == "-f")
+        if (a == "--help")
         {
-            fractalSB = true;
-            // check next arg if exists and is integer -> levels
+            std::cout
+                << "Usage: " << argv[0]
+                << " <input.root> <selectedBranches.csv> <output.cc> [options]\n"
+                << "Options:\n"
+                << "  --res-config <file>           Resonance groups config file (preferred)\n"
+                << "  -r, --resonances NAME=SUFFIX[,NAME2=SUFFIX2,...]   (inline, legacy)\n"
+                << "  -f, --fractal-sb [NLEVELS]    Enable fractal sidebands (optional levels)\n";
+            return 0;
+        }
+        else if (a == "-r" || a == "--resonances")
+        {
             if (i + 1 < argc)
             {
-                // try parse integer
+                auto parsed = parseResonanceArg(argv[++i]);
+                RESONANCE_GROUPS_CLI.insert(RESONANCE_GROUPS_CLI.end(), parsed.begin(),
+                                            parsed.end());
+            }
+            else
+            {
+                std::cerr << "Error: missing argument for " << a << "\n";
+                return 1;
+            }
+        }
+        else if (a == "--res-config")
+        {
+            if (i + 1 < argc)
+            {
+                string fname = argv[++i];
+                auto parsed = parseResonanceFile(fname);
+                RESONANCE_GROUPS_CLI.insert(RESONANCE_GROUPS_CLI.end(), parsed.begin(),
+                                            parsed.end());
+            }
+            else
+            {
+                std::cerr << "Error: missing filename for --res-config\n";
+                return 1;
+            }
+        }
+        else if (a == "-f" || a == "--fractal-sb")
+        {
+            fractalSB = true;
+            // optional levels
+            if (i + 1 < argc)
+            {
                 try
                 {
                     int v = std::stoi(argv[i + 1]);
                     if (v > 1)
                     {
                         sbLevels = v;
-                        ++i; // consume
+                        ++i;
                     }
                 }
                 catch (...)
-                { /* not an integer; ignore */
+                { /* not numeric, ignore */
                 }
             }
         }
         else
         {
-            // fallback: interpret as showErrors integer if it looks like one
+            // try to parse as showErrors int
             try
             {
                 int val = std::stoi(a);
                 showErrors = (val != 0);
             }
             catch (...)
-            { /* ignore unknown args */
+            { /* ignore unknown */
             }
+        }
+    }
+
+    if (RESONANCE_GROUPS_CLI.empty())
+    {
+        std::cout << "No resonance groups supplied. Generator will not compute sideband groups.\n";
+    }
+    else
+    {
+        std::cout << "Resonances from input:\n";
+        for (auto &p : RESONANCE_GROUPS_CLI)
+        {
+            std::cout << "  " << p.first << " -> " << p.second << "\n";
         }
     }
 
     size_t totalPlots = 0;
 
-    // ------------------------------
-    // USER: define resonance groups here in the generator (this example is used
-    // by the generator to find branches named "mass_<suffix>" and compute
-    // sideband windows). The same array is copied into the generated macro for
-    // user reference/editing.
-    // ------------------------------
-    // format: pair<resonance_name, branch_suffix_string>
-    // example: {"omega", "PiPlus_PiMinus1_Photon1_Photon2"}
-    // ------------------------------
-    static const std::pair<std::string, std::string> RESONANCE_GROUPS[] = {
-        {"omega", "PiPlus_PiMinus1_Photon1_Photon2"}, {"Lambda", "PiMinus2_Proton"}};
-    // ------------------------------
-
     // parameters controlling widths (you can change these defaults)
-    double n_sig = 2.0; // signal window = mean +/- n_sig * sigma
-    double sb_inner =
-        3.0; // (kept for backward compatibility with previous single-sideband calculation)
+    double n_sig = 2.0;    // signal window = mean +/- n_sig * sigma
+    double sb_inner = 3.0; // (kept for compatibility)
     double sb_outer = 5.0; // outermost sigma for sidebands
 
     std::ifstream ifs(csvFile);
@@ -361,9 +502,8 @@ int main(int argc, char **argv)
     }
 
     // -----------------------
-    // For each resonance group, try to locate the corresponding mass branch
+    // For each resonance group provided in CLI/file, locate the corresponding mass branch
     // and compute mean & sigma (used to create signal/sideband windows).
-    // Also compute fractal-level boundaries & coefficients if fractalSB is enabled.
     // -----------------------
     struct SBBounds
     {
@@ -375,9 +515,9 @@ int main(int argc, char **argv)
         double left_lo = NAN, left_hi = NAN;
         double right_lo = NAN, right_hi = NAN;
         // fractal: per-level inner/outer (levels count)
-        std::vector<double> level_inner; // positive distances in sigma: n_sig + ...
+        std::vector<double> level_inner; // positive distances in sigma
         std::vector<double> level_outer;
-        std::vector<double> level_inner_val; // absolute mass values (mean - inner*sigma etc)
+        std::vector<double> level_inner_val; // absolute mass values
         std::vector<double> level_outer_val;
         std::vector<double> coeff; // coefficient per level
     };
@@ -391,8 +531,8 @@ int main(int argc, char **argv)
         allColSet.insert((std::string)c);
     }
 
-    // For each config entry, find mass_<suffix> branch and compute stats
-    for (const auto &entry : RESONANCE_GROUPS)
+    // Use parsed resonance groups
+    for (const auto &entry : RESONANCE_GROUPS_CLI)
     {
         std::string rname = entry.first;
         std::string suffix = entry.second;
@@ -447,8 +587,6 @@ int main(int argc, char **argv)
             b.level_outer_val.resize(L);
             b.coeff.resize(L);
             // compute level edges in sigma-units:
-            // level 0 = [0, n_sig]
-            // levels 1..L-1 split [n_sig, sb_outer] linearly
             double range = std::max(0.0, sb_outer - n_sig);
             double delta = (L > 1) ? (range / double(L - 1)) : 0.0;
             for (int l = 0; l < L; ++l)
@@ -463,14 +601,10 @@ int main(int argc, char **argv)
                     b.level_inner[l] = n_sig + (l - 1) * delta;
                     b.level_outer[l] = n_sig + (l)*delta;
                 }
-                // convert to absolute mass ranges (we'll use these numeric values directly in
-                // generated code)
                 b.level_inner_val[l] =
                     mean - b.level_outer[l] * sigma; // left-most outer for lower bound
                 b.level_outer_val[l] =
-                    mean -
-                    b.level_inner[l] * sigma; // left-most inner for upper bound (for left side)
-                // coeff rule: pow(-0.5, level)
+                    mean - b.level_inner[l] * sigma; // left-most inner for upper bound
                 b.coeff[l] = std::pow(-0.5, l);
             }
         }
@@ -496,7 +630,7 @@ int main(int argc, char **argv)
     std::ofstream ofs(outFile);
 
     ofs << "#include <ROOT/RDataFrame.hxx>\n"
-        << "#include <TFile.h>\n"
+        << "#include <TFile.h>\n        "
         << "#include <TCanvas.h>\n"
         << "#include <TKey.h>\n"
         << "#include <TGaxis.h>\n"
@@ -505,23 +639,21 @@ int main(int argc, char **argv)
         << "using namespace ROOT;\n"
         << "void plots(){\n"
         << "  TFile *f = TFile::Open(\"" << inputFile << "\", \"READ\");\n"
-        << "  if (!f || f->IsZombie()) throw std::runtime_error(\"Cannot open "
-           "\\\" "
-        << inputFile << "\\\"\");\n"
+        << "  if (!f || f->IsZombie()) throw std::runtime_error(\"Cannot open \\\"" << inputFile
+        << "\\\"\");\n"
         << "  TIter itKey(f->GetListOfKeys()); TKey *key; std::string tree;\n"
-        << "  while ((key = (TKey*)itKey())) {\n    if "
-           "(std::string(key->GetClassName()) == \"TTree\") { tree = "
-           "key->GetName(); break; }\n  }\n"
+        << "  while ((key = (TKey*)itKey())) { if (std::string(key->GetClassName()) == \"TTree\") "
+           "{ tree = key->GetName(); break; } }\n"
         << "  if (tree.empty()) throw std::runtime_error(\"No TTree\");\n"
         << "  auto df = RDataFrame(tree, \"" << cpy << "*.root\");\n\n";
 
     // write user-visible resonance config into generated macro
     ofs << "  // ----------------------\n";
-    ofs << "  // Resonance groups (user-configurable)\n";
+    ofs << "  // Resonance groups (provided by the generator; edit here if you wish)\n";
     ofs << "  // Format: pair<resonance_name, branch_suffix>\n";
-    ofs << "  // Example (generator used these to compute windows):\n";
+    ofs << "  // The generator read these from CLI or --res-config file:\n";
     ofs << "  static const std::pair<std::string, std::string> RESONANCE_GROUPS[] = {\n";
-    for (const auto &entry : RESONANCE_GROUPS)
+    for (const auto &entry : RESONANCE_GROUPS_CLI)
     {
         ofs << "    {\"" << entry.first << "\", \"" << entry.second << "\"},\n";
     }
@@ -558,7 +690,6 @@ int main(int argc, char **argv)
         {
             int L = (int)b.level_inner.size();
             ofs << "  // fractal levels: " << L << "\n";
-            // print coefficients array
             ofs << "  const int res_" << r << "_levels = " << L << ";\n";
             ofs << "  const double res_" << r << "_coeffs[] = {";
             for (int l = 0; l < L; ++l)
@@ -570,8 +701,6 @@ int main(int argc, char **argv)
                 ofs << b.coeff[l];
             }
             ofs << "};\n";
-            // print numeric boundaries for each level (we'll provide left and right pairs)
-            // We'll emit level boundaries in mass units for left and right symmetric check
             for (int l = 0; l < L; ++l)
             {
                 double left_lo = b.mean - b.level_outer[l] * b.sigma;
@@ -595,7 +724,6 @@ int main(int argc, char **argv)
     ofs << "  // ----------------------\n\n";
 
     // Create per-resonance 1D sideband weight columns in the generated macro
-    // If fractalSB is enabled, create weights using per-level coefficients.
     for (const auto &p : resonanceBounds)
     {
         const auto &r = p.first;
@@ -615,10 +743,8 @@ int main(int argc, char **argv)
         {
             int L = (int)b.level_inner.size();
             ofs << "  df = df.Define(\"" << wname << "\", [](double m){\n";
-            // check levels from 0..L-1
             for (int l = 0; l < L; ++l)
             {
-                // signal level 0 is symmetric between left and right
                 if (l == 0)
                 {
                     ofs << "    if (m >= " << (b.mean - b.level_outer[0] * b.sigma)
@@ -663,7 +789,7 @@ int main(int argc, char **argv)
         double minv = df.Min<double>(b).GetValue();
         double maxv = df.Max<double>(b).GetValue();
         auto data_b = df.Take<double>(b).GetValue();
-        size_t bins1 = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_b));
+        size_t bins1 = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_b));
         string weightCol = "";
         auto it = branchToRes.find(b);
         if (it != branchToRes.end())
@@ -722,8 +848,8 @@ int main(int argc, char **argv)
             pHmax = df.Max<double>(pH).GetValue();
         }
 
-        size_t bm = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_m));
-        size_t ba = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_a));
+        size_t bm = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_m));
+        size_t ba = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_a));
 
         string xtitle = "Mass[" + particleNameToLatex(mass) + "] (GeV)";
         string ytitle = "";
@@ -770,8 +896,8 @@ int main(int argc, char **argv)
             double ymax = df.Max<double>(y).GetValue();
             auto data_x = df.Take<double>(x).GetValue();
             auto data_y = df.Take<double>(y).GetValue();
-            size_t bx = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_x));
-            size_t by = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_y));
+            size_t bx = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_x));
+            size_t by = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_y));
             string xtitle = "Mass[" + particleNameToLatex(x) + "] (GeV)";
             string ytitle = "Mass[" + particleNameToLatex(y) + "] (GeV)";
 
@@ -852,8 +978,8 @@ int main(int argc, char **argv)
             {
                 sqy.push_back(v * v);
             }
-            size_t binsx = 300; // static_cast<size_t>(Knuth::computeNumberBins(sqx));
-            size_t binsy = 300; // static_cast<size_t>(Knuth::computeNumberBins(sqy));
+            size_t binsx = 104; // static_cast<size_t>(Knuth::computeNumberBins(sqx));
+            size_t binsy = 104; // static_cast<size_t>(Knuth::computeNumberBins(sqy));
             string xtitle = "Mass[" + particleNameToLatex(b1) + "]^{2} (GeV^{2})";
             string ytitle = "Mass[" + particleNameToLatex(b2) + "]^{2} (GeV^{2})";
 
@@ -888,7 +1014,6 @@ int main(int argc, char **argv)
 
                 if (!fractalSB)
                 {
-                    // original simple 3x3 logic
                     ofs << "    int r1 = 0; // 2=Sig, 1=Sideband, 0=Other\n";
                     ofs << "    if (m1 >= " << A.sig_lo << " && m1 <= " << A.sig_hi
                         << ") r1 = 2;\n";
@@ -908,12 +1033,9 @@ int main(int argc, char **argv)
                 }
                 else
                 {
-                    // fractal multi-level logic: compute level index for each axis and multiply
-                    // coefficients
                     int LA = (int)A.level_inner.size();
                     int LB = (int)B.level_inner.size();
                     ofs << "    int lvl1 = -1;\n";
-                    // levels for axis1
                     for (int l = 0; l < LA; ++l)
                     {
                         if (l == 0)
@@ -934,7 +1056,6 @@ int main(int argc, char **argv)
                         }
                     }
                     ofs << "    int lvl2 = -1;\n";
-                    // levels for axis2
                     for (int l = 0; l < LB; ++l)
                     {
                         if (l == 0)
@@ -954,10 +1075,7 @@ int main(int argc, char **argv)
                                 << ")) lvl2 = " << l << ";\n";
                         }
                     }
-                    // now multiply coefficients if both levels found
                     ofs << "    if (lvl1 < 0 || lvl2 < 0) return 0.0;\n";
-                    // create an array of coeffs inline for axis1 and axis2 (we'll simply hardcode
-                    // arrays)
                     ofs << "    const double coeff1[] = {";
                     for (int l = 0; l < LA; ++l)
                     {
