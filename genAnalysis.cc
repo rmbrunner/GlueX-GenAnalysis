@@ -629,7 +629,7 @@ int main(int argc, char **argv)
         << "#include <string>\n"
         << "#include <TLorentzVector.h>\n"
         << "using namespace ROOT;\n"
-        << "using RDF = ROOT::RDF;\n"
+        << "namespace RDF = ROOT::RDF;\n" // <- correct namespace alias
         << "void plots(){\n"
         << "  TFile *f = TFile::Open(\"" << inputFile << "\", \"READ\");\n"
         << "  if (!f || f->IsZombie()) throw std::runtime_error(\"Cannot open \\\"" << inputFile
@@ -647,9 +647,10 @@ int main(int argc, char **argv)
     ofs << "  // you may use 'node' directly or create a RDataFrame from it.\n";
     ofs << "  RDF::RNode node = df; // start node\n\n";
 
+    // Emit unambiguous Filter call using std::string and std::vector<std::string>
     ofs << "  // --- EXAMPLE 1: string-expression filter (portable)\n";
-    ofs << "  node = node.Filter(\"x < 1.0/(y + 1.0) && nTracks > 0\", {\"x\",\"y\",\"nTracks\"}, "
-           "\"x-y cut\");\n\n";
+    ofs << "  node = node.Filter(std::string(\"x < 1.0/(y + 1.0) && nTracks > 0\"), "
+           "std::vector<std::string>{\"x\",\"y\",\"nTracks\"}, std::string(\"x-y cut\"));\n\n";
 
     ofs << "  // --- EXAMPLE 2: define TLorentzVector from primitives ---\n";
     ofs << "  node = node.Define(\"p4_candidate\",\n";
@@ -663,12 +664,14 @@ int main(int argc, char **argv)
     ofs << "                     [](const TLorentzVector &p4) { return (p4.Pt() > 0.5) && "
            "(std::abs(p4.Eta()) < 2.4); },\n";
     ofs << "                     {\"p4_candidate\"});\n";
-    ofs << "  node = node.Filter(\"p4_pass\", {\"p4_pass\"}, \"candidate kinematics\");\n\n";
+    ofs << "  node = node.Filter(std::string(\"p4_pass\"), std::vector<std::string>{\"p4_pass\"}, "
+           "std::string(\"candidate kinematics\"));\n\n";
 
     ofs << "  // --- EXAMPLE 4: if tree already has TLorentzVector branch-objects\n";
     ofs << "  node = node.Define(\"obj_pass\", [](const TLorentzVector &p) { return p.M() > 0.4 && "
            "p.Pt() > 0.3; }, {\"candP4\"});\n";
-    ofs << "  node = node.Filter(\"obj_pass\", {\"obj_pass\"}, \"candP4 mass+pt cut\");\n\n";
+    ofs << "  node = node.Filter(std::string(\"obj_pass\"), "
+           "std::vector<std::string>{\"obj_pass\"}, std::string(\"candP4 mass+pt cut\"));\n\n";
 
     ofs << "  // --- EXAMPLE 5: compose named masks for clarity ---\n";
     ofs << "  node = node.Define(\"has_tracks\", [](int n){ return n >= 2; }, "
@@ -677,7 +680,8 @@ int main(int argc, char **argv)
            "< 2.5; }, {\"p4_candidate\"});\n";
     ofs << "  node = node.Define(\"myPreselection\", [](bool a, bool b){ return a && b; }, "
            "{\"has_tracks\",\"in_acc\"});\n";
-    ofs << "  node = node.Filter(\"myPreselection\", {\"myPreselection\"}, \"preselection\");\n\n";
+    ofs << "  node = node.Filter(std::string(\"myPreselection\"), "
+           "std::vector<std::string>{\"myPreselection\"}, std::string(\"preselection\"));\n\n";
 
     ofs << "  // Now 'node' contains the user-filtered dataset. Do NOT reassign 'df'.\n";
     ofs << "  // From here on, sideband weight Defines will be applied to 'node' and\n";
@@ -822,26 +826,20 @@ int main(int argc, char **argv)
         branchToRes[p.second.branch] = p.first;
     }
 
-    // For 1D histograms we will use the final node by converting it to a RDataFrame
-    // when generating the histogram lines. We will reference it as "node" when
-    // creating per-pair df2 nodes, and as "RDataFrame(node)" for direct histograms.
-    // To keep generated code clean, produce a small alias:
-    ofs << "  // final plotting dataframe constructed from user node (do not reassign df)\n";
-    ofs << "  auto df_for_plots = RDataFrame(node);\n\n";
-
     for (auto &b : cols)
     {
         double minv = df.Min<double>(b).GetValue();
         double maxv = df.Max<double>(b).GetValue();
         auto data_b = df.Take<double>(b).GetValue();
-        size_t bins1 = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_b));
+        size_t bins1 = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_b));
         string weightCol = "";
         auto it = branchToRes.find(b);
         if (it != branchToRes.end())
         {
             weightCol = "sb_w_" + it->second; // use the 1D sideband weight for this resonance
         }
-        ofs << makeHisto1D("df_for_plots", b, bins1, minv, maxv, showErrors, weightCol);
+        // use node directly for histograms (node.Histo1D(...))
+        ofs << makeHisto1D("node", b, bins1, minv, maxv, showErrors, weightCol);
         totalPlots++;
     }
 
@@ -892,36 +890,36 @@ int main(int argc, char **argv)
             pHmax = df.Max<double>(pH).GetValue();
         }
 
-        size_t bm = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_m));
-        size_t ba = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_a));
+        size_t bm = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_m));
+        size_t ba = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_a));
 
         string xtitle = "Mass[" + particleNameToLatex(mass) + "] (GeV)";
         string ytitle = "";
         if (m != finalState)
         {
             ytitle = particleNameToLatex(clab);
-            ofs << makeHisto2D("df_for_plots", mass, clab, bm, xmin, xmax, ba, clabmin, clabmax,
-                               xtitle, ytitle, showErrors);
+            ofs << makeHisto2D("node", mass, clab, bm, xmin, xmax, ba, clabmin, clabmax, xtitle,
+                               ytitle, showErrors);
             totalPlots++;
             ytitle = particleNameToLatex(plab);
-            ofs << makeHisto2D("df_for_plots", mass, plab, bm, xmin, xmax, ba, plabmin, plabmax,
-                               xtitle, ytitle, showErrors);
+            ofs << makeHisto2D("node", mass, plab, bm, xmin, xmax, ba, plabmin, plabmax, xtitle,
+                               ytitle, showErrors);
             totalPlots++;
             ytitle = particleNameToLatex(cGJ);
-            ofs << makeHisto2D("df_for_plots", mass, cGJ, bm, xmin, xmax, ba, cGJmin, cGJmax,
-                               xtitle, ytitle, showErrors);
+            ofs << makeHisto2D("node", mass, cGJ, bm, xmin, xmax, ba, cGJmin, cGJmax, xtitle,
+                               ytitle, showErrors);
             totalPlots++;
             ytitle = particleNameToLatex(pGJ);
-            ofs << makeHisto2D("df_for_plots", mass, pGJ, bm, xmin, xmax, ba, pGJmin, pGJmax,
-                               xtitle, ytitle, showErrors);
+            ofs << makeHisto2D("node", mass, pGJ, bm, xmin, xmax, ba, pGJmin, pGJmax, xtitle,
+                               ytitle, showErrors);
             totalPlots++;
             ytitle = particleNameToLatex(cH);
-            ofs << makeHisto2D("df_for_plots", mass, cH, bm, xmin, xmax, ba, cHmin, cHmax, xtitle,
-                               ytitle, showErrors);
+            ofs << makeHisto2D("node", mass, cH, bm, xmin, xmax, ba, cHmin, cHmax, xtitle, ytitle,
+                               showErrors);
             totalPlots++;
             ytitle = particleNameToLatex(pH);
-            ofs << makeHisto2D("df_for_plots", mass, pH, bm, xmin, xmax, ba, pHmin, pHmax, xtitle,
-                               ytitle, showErrors);
+            ofs << makeHisto2D("node", mass, pH, bm, xmin, xmax, ba, pHmin, pHmax, xtitle, ytitle,
+                               showErrors);
             totalPlots++;
         }
     }
@@ -939,8 +937,8 @@ int main(int argc, char **argv)
             double ymax = df.Max<double>(y).GetValue();
             auto data_x = df.Take<double>(x).GetValue();
             auto data_y = df.Take<double>(y).GetValue();
-            size_t bx = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_x));
-            size_t by = 104; // static_cast<size_t>(Knuth::computeNumberBins(data_y));
+            size_t bx = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_x));
+            size_t by = 300; // static_cast<size_t>(Knuth::computeNumberBins(data_y));
             string xtitle = "Mass[" + particleNameToLatex(x) + "] (GeV)";
             string ytitle = "Mass[" + particleNameToLatex(y) + "] (GeV)";
 
@@ -967,7 +965,7 @@ int main(int argc, char **argv)
                 weightCol = "sb_w_" + res_x;
             }
 
-            ofs << makeHisto2D("df_for_plots", x, y, bx, xmin, xmax, by, ymin, ymax, xtitle, ytitle,
+            ofs << makeHisto2D("node", x, y, bx, xmin, xmax, by, ymin, ymax, xtitle, ytitle,
                                showErrors, weightCol);
             totalPlots++;
         }
@@ -1026,8 +1024,8 @@ int main(int argc, char **argv)
             {
                 sqy.push_back(v * v);
             }
-            size_t binsx = 104; // static_cast<size_t>(Knuth::computeNumberBins(sqx));
-            size_t binsy = 104; // static_cast<size_t>(Knuth::computeNumberBins(sqy));
+            size_t binsx = 300; // static_cast<size_t>(Knuth::computeNumberBins(sqx));
+            size_t binsy = 300; // static_cast<size_t>(Knuth::computeNumberBins(sqy));
             string xtitle = "Mass[" + particleNameToLatex(b1) + "]^{2} (GeV^{2})";
             string ytitle = "Mass[" + particleNameToLatex(b2) + "]^{2} (GeV^{2})";
 
