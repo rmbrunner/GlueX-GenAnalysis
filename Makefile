@@ -1,11 +1,11 @@
 #!gnumake
 
-INCLUDE = -I. -I../../$(BMS_OSNAME)/include -I$(HALLD_RECON_HOME)/$(BMS_OSNAME)/include -I/group/halld/Software/builds/$(BMS_OSNAME)/gluex_root_analysis/gluex_root_analysis-$(GLUEX_ROOT_ANALYSIS_VERSION)/$(BMS_OSNAME)/include/DSelector/
+INCLUDE = -I. -I../../$(BMS_OSNAME)/include -I$(HALLD_RECON_HOME)/$(BMS_OSNAME)/include 
 ROOTFLAGS = $(shell $(ROOTSYS)/bin/root-config --cflags) 
 CXXFLAGS = -O -Wall -fPIC 
 FLAGS = $(CXXFLAGS) $(ROOTFLAGS) $(INCLUDE)
 ROOTGLIBS = $(shell $(ROOTSYS)/bin/root-config --glibs) 
-LIBS = $(ROOTGLIBS) -L/group/halld/Software/builds/$(BMS_OSNAME)/gluex_root_analysis/gluex_root_analysis-$(GLUEX_ROOT_ANALYSIS_VERSION)/$(BMS_OSNAME)/lib/ #-lDSelector
+LIBS = $(ROOTGLIBS) -L/group/halld/Software/builds/$(BMS_OSNAME)/gluex_root_analysis/gluex_root_analysis-$(GLUEX_ROOT_ANALYSIS_VERSION)/$(BMS_OSNAME)/lib/ 
 
 all: install
 
