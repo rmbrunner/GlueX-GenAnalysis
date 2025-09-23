@@ -27,7 +27,7 @@ using std::map;
 using std::string;
 using std::vector;
 
-// split tokens helper (used for Dalitz pairing logic)
+// -------------------- helpers --------------------
 static std::vector<std::string> splitTokens(const std::string &s)
 {
     std::vector<std::string> toks;
@@ -40,8 +40,7 @@ static std::vector<std::string> splitTokens(const std::string &s)
     return toks;
 }
 
-// parse resonance argument string into vector of (name,suffix) pairs
-// arg format: name=suffix[,name2=suffix2,...]  (also accepts ":" as separator)
+// parse resonance pairs "name=suffix[,name2=suffix2,...]" or "name:suffix"
 static std::vector<std::pair<std::string, std::string>> parseResonanceArg(const std::string &arg)
 {
     std::vector<std::pair<std::string, std::string>> out;
@@ -53,7 +52,6 @@ static std::vector<std::pair<std::string, std::string>> parseResonanceArg(const 
         {
             continue;
         }
-        // trim whitespace
         auto l = token.find_first_not_of(" \t\n\r");
         auto r = token.find_last_not_of(" \t\n\r");
         if (l == std::string::npos)
@@ -74,7 +72,6 @@ static std::vector<std::pair<std::string, std::string>> parseResonanceArg(const 
         }
         std::string name = token.substr(0, eq);
         std::string suffix = token.substr(eq + 1);
-        // trim both
         auto trim = [](std::string s) {
             auto l = s.find_first_not_of(" \t\n\r");
             if (l == std::string::npos)
@@ -94,11 +91,7 @@ static std::vector<std::pair<std::string, std::string>> parseResonanceArg(const 
     return out;
 }
 
-// parse a resonance config file with lines like:
-// # comment
-// omega=PiPlus_PiMinus1_Photon1_Photon2
-// Lambda=PiMinus2_Proton
-// also accepts comma-separated pairs on a single line
+// parse a small config file with one or comma-separated pairs per line
 static std::vector<std::pair<std::string, std::string>> parseResonanceFile(const std::string &fname)
 {
     std::vector<std::pair<std::string, std::string>> out;
@@ -111,7 +104,6 @@ static std::vector<std::pair<std::string, std::string>> parseResonanceFile(const
     std::string line;
     while (std::getline(ifs, line))
     {
-        // trim
         auto l = line.find_first_not_of(" \t\n\r");
         if (l == std::string::npos)
         {
@@ -125,9 +117,8 @@ static std::vector<std::pair<std::string, std::string>> parseResonanceFile(const
         }
         if (t[0] == '#')
         {
-            continue; // comment
+            continue;
         }
-        // pass to parseResonanceArg so comma-separated tokens are handled too
         auto parsed = parseResonanceArg(t);
         out.insert(out.end(), parsed.begin(), parsed.end());
     }
@@ -180,9 +171,9 @@ string particleNameToLatex(const string &branch)
     return joined;
 }
 
-// histogram helpers for the generated macro
-string makeHisto1D(const string &b, size_t bins, double min, double max, bool showErrors,
-                   const string &weightCol = "")
+// makeHisto1D now accepts a dfName (RNode/RDataFrame variable name) to avoid hardcoded "df"
+string makeHisto1D(const string &dfName, const string &b, size_t bins, double min, double max,
+                   bool showErrors, const string &weightCol = "")
 {
     std::ostringstream out;
     double binWidth = static_cast<int>(1000 * ((max - min) / bins));
@@ -190,12 +181,12 @@ string makeHisto1D(const string &b, size_t bins, double min, double max, bool sh
     string title = "Mass[" + particleNameToLatex(b) + "] (GeV)";
     if (weightCol.empty())
     {
-        out << "  auto " << histName << " = df.Histo1D({\"" << histName << "\",\""
+        out << "  auto " << histName << " = " << dfName << ".Histo1D({\"" << histName << "\",\""
             << "" << "\"," << bins << "," << min << "," << max << "}, \"" << b << "\");\n";
     }
     else
     {
-        out << "  auto " << histName << " = df.Histo1D({\"" << histName << "\",\""
+        out << "  auto " << histName << " = " << dfName << ".Histo1D({\"" << histName << "\",\""
             << "" << "\"," << bins << "," << min << "," << max << "}, \"" << b << "\", \""
             << weightCol << "\");\n";
     }
@@ -207,9 +198,10 @@ string makeHisto1D(const string &b, size_t bins, double min, double max, bool sh
     return out.str();
 }
 
-string makeHisto2D(const string &x, const string &y, size_t bx, double xmin, double xmax, size_t by,
-                   double ymin, double ymax, const string &xlabel, const string &ylabel,
-                   bool showErrors, const string &dfName, const string &weightCol = "")
+// makeHisto2D already accepts dfName; keep it but ensure dfName is used.
+string makeHisto2D(const string &dfName, const string &x, const string &y, size_t bx, double xmin,
+                   double xmax, size_t by, double ymin, double ymax, const string &xlabel,
+                   const string &ylabel, bool showErrors, const string &weightCol = "")
 {
     std::ostringstream out;
     string histName = "h2_" + x + "_" + y;
@@ -237,8 +229,7 @@ string makeHisto2D(const string &x, const string &y, size_t bx, double xmin, dou
 }
 
 // ---------------------------------------------------------------------
-// Use the user-provided peak+sigma estimator (fits a gaussian to a local window)
-// ---------------------------------------------------------------------
+// estimatePeakAndSigmaFromVec (your fitter-based routine)
 static std::pair<double, double> estimatePeakAndSigmaFromVec(const vector<double> &vec,
                                                              int nbins = 400)
 {
@@ -629,14 +620,16 @@ int main(int argc, char **argv)
 
     std::ofstream ofs(outFile);
 
+    // Begin writing generated macro
     ofs << "#include <ROOT/RDataFrame.hxx>\n"
-        << "#include <TFile.h>\n        "
+        << "#include <TFile.h>\n"
         << "#include <TCanvas.h>\n"
         << "#include <TKey.h>\n"
         << "#include <TGaxis.h>\n"
         << "#include <string>\n"
         << "#include <TLorentzVector.h>\n"
         << "using namespace ROOT;\n"
+        << "using RDF = ROOT::RDF;\n"
         << "void plots(){\n"
         << "  TFile *f = TFile::Open(\"" << inputFile << "\", \"READ\");\n"
         << "  if (!f || f->IsZombie()) throw std::runtime_error(\"Cannot open \\\"" << inputFile
@@ -646,6 +639,50 @@ int main(int argc, char **argv)
            "{ tree = key->GetName(); break; } }\n"
         << "  if (tree.empty()) throw std::runtime_error(\"No TTree\");\n"
         << "  auto df = RDataFrame(tree, \"" << cpy << "*.root\");\n\n";
+
+    // Insert user-visible filters block that uses RDF::RNode node (portable)
+    ofs << "  // ================= USER FILTERS =================\n";
+    ofs << "  // Build RDF::RNode from the original df. Compose all user-specific\n";
+    ofs << "  // Define / Filter calls on 'node' (do NOT reassign 'df'). At the end\n";
+    ofs << "  // you may use 'node' directly or create a RDataFrame from it.\n";
+    ofs << "  RDF::RNode node = df; // start node\n\n";
+
+    ofs << "  // --- EXAMPLE 1: string-expression filter (portable)\n";
+    ofs << "  node = node.Filter(\"x < 1.0/(y + 1.0) && nTracks > 0\", {\"x\",\"y\",\"nTracks\"}, "
+           "\"x-y cut\");\n\n";
+
+    ofs << "  // --- EXAMPLE 2: define TLorentzVector from primitives ---\n";
+    ofs << "  node = node.Define(\"p4_candidate\",\n";
+    ofs << "                   [](double px, double py, double pz, double e) {\n";
+    ofs << "                       TLorentzVector v; v.SetPxPyPzE(px, py, pz, e); return v;\n";
+    ofs << "                   },\n";
+    ofs << "                   {\"cand_px\", \"cand_py\", \"cand_pz\", \"cand_e\"});\n\n";
+
+    ofs << "  // --- EXAMPLE 3: define boolean mask then filter (recommended for lambdas)\n";
+    ofs << "  node = node.Define(\"p4_pass\",\n";
+    ofs << "                     [](const TLorentzVector &p4) { return (p4.Pt() > 0.5) && "
+           "(std::abs(p4.Eta()) < 2.4); },\n";
+    ofs << "                     {\"p4_candidate\"});\n";
+    ofs << "  node = node.Filter(\"p4_pass\", {\"p4_pass\"}, \"candidate kinematics\");\n\n";
+
+    ofs << "  // --- EXAMPLE 4: if tree already has TLorentzVector branch-objects\n";
+    ofs << "  node = node.Define(\"obj_pass\", [](const TLorentzVector &p) { return p.M() > 0.4 && "
+           "p.Pt() > 0.3; }, {\"candP4\"});\n";
+    ofs << "  node = node.Filter(\"obj_pass\", {\"obj_pass\"}, \"candP4 mass+pt cut\");\n\n";
+
+    ofs << "  // --- EXAMPLE 5: compose named masks for clarity ---\n";
+    ofs << "  node = node.Define(\"has_tracks\", [](int n){ return n >= 2; }, "
+           "{\"nGoodTracks\"});\n";
+    ofs << "  node = node.Define(\"in_acc\", [](const TLorentzVector &p){ return std::abs(p.Eta()) "
+           "< 2.5; }, {\"p4_candidate\"});\n";
+    ofs << "  node = node.Define(\"myPreselection\", [](bool a, bool b){ return a && b; }, "
+           "{\"has_tracks\",\"in_acc\"});\n";
+    ofs << "  node = node.Filter(\"myPreselection\", {\"myPreselection\"}, \"preselection\");\n\n";
+
+    ofs << "  // Now 'node' contains the user-filtered dataset. Do NOT reassign 'df'.\n";
+    ofs << "  // From here on, sideband weight Defines will be applied to 'node' and\n";
+    ofs << "  // per-pair nodes will be created as needed (auto df2_x = node.Define(...)).\n";
+    ofs << "  // =================================================\n\n";
 
     // write user-visible resonance config into generated macro
     ofs << "  // ----------------------\n";
@@ -724,6 +761,7 @@ int main(int argc, char **argv)
     ofs << "  // ----------------------\n\n";
 
     // Create per-resonance 1D sideband weight columns in the generated macro
+    // Use node = node.Define(...) pattern (no df = df.*)
     for (const auto &p : resonanceBounds)
     {
         const auto &r = p.first;
@@ -732,7 +770,7 @@ int main(int argc, char **argv)
         ofs << "  // define 1D sideband weight for resonance '" << r << "'\n";
         if (!fractalSB)
         {
-            ofs << "  df = df.Define(\"" << wname << "\", [](double m){\n";
+            ofs << "  node = node.Define(\"" << wname << "\", [](double m){\n";
             ofs << "    if (m >= " << b.sig_lo << " && m <= " << b.sig_hi << ") return 1.0;\n";
             ofs << "    if ((m >= " << b.left_lo << " && m <= " << b.left_hi
                 << ") || (m >= " << b.right_lo << " && m <= " << b.right_hi << ")) return -0.5;\n";
@@ -742,7 +780,7 @@ int main(int argc, char **argv)
         else
         {
             int L = (int)b.level_inner.size();
-            ofs << "  df = df.Define(\"" << wname << "\", [](double m){\n";
+            ofs << "  node = node.Define(\"" << wname << "\", [](double m){\n";
             for (int l = 0; l < L; ++l)
             {
                 if (l == 0)
@@ -767,13 +805,13 @@ int main(int argc, char **argv)
         }
     }
 
-    ofs << "TFile* histograms =TFile::Open(\"histograms.root\", \"RECREATE\"); \n"
-        << "std::ifstream totalplots(\"totalPlots.txt\");\n"
-        << "std::string total;\n"
-        << "std::getline(totalplots,total);\n"
-        << "size_t numplots = std::stoul(total);\n"
-        << "size_t progress = 0;\n"
-        << "histograms->cd();\n";
+    ofs << "  TFile* histograms =TFile::Open(\"histograms.root\", \"RECREATE\"); \n"
+        << "  std::ifstream totalplots(\"totalPlots.txt\");\n"
+        << "  std::string total;\n"
+        << "  std::getline(totalplots,total);\n"
+        << "  size_t numplots = std::stoul(total);\n"
+        << "  size_t progress = 0;\n"
+        << "  histograms->cd();\n";
 
     std::cout << "Creating 1D Histograms..." << std::endl;
 
@@ -783,6 +821,13 @@ int main(int argc, char **argv)
     {
         branchToRes[p.second.branch] = p.first;
     }
+
+    // For 1D histograms we will use the final node by converting it to a RDataFrame
+    // when generating the histogram lines. We will reference it as "node" when
+    // creating per-pair df2 nodes, and as "RDataFrame(node)" for direct histograms.
+    // To keep generated code clean, produce a small alias:
+    ofs << "  // final plotting dataframe constructed from user node (do not reassign df)\n";
+    ofs << "  auto df_for_plots = RDataFrame(node);\n\n";
 
     for (auto &b : cols)
     {
@@ -796,7 +841,7 @@ int main(int argc, char **argv)
         {
             weightCol = "sb_w_" + it->second; // use the 1D sideband weight for this resonance
         }
-        ofs << makeHisto1D(b, bins1, minv, maxv, showErrors, weightCol);
+        ofs << makeHisto1D("df_for_plots", b, bins1, minv, maxv, showErrors, weightCol);
         totalPlots++;
     }
 
@@ -812,7 +857,6 @@ int main(int argc, char **argv)
         }
         string costh = "costh_";
         string phi = "phi_";
-        string dfName = "df";
         string clab = costh + "lab_" + m, plab = phi + "lab_" + m;
         string cGJ = "costh_GJ_" + m, pGJ = "phi_GJ_" + m, cH = "costh_H_" + m, pH = "phi_H_" + m;
 
@@ -853,31 +897,31 @@ int main(int argc, char **argv)
 
         string xtitle = "Mass[" + particleNameToLatex(mass) + "] (GeV)";
         string ytitle = "";
-        ytitle = particleNameToLatex(clab);
-        ofs << makeHisto2D(mass, clab, bm, xmin, xmax, ba, clabmin, clabmax, xtitle, ytitle,
-                           showErrors, dfName);
-        totalPlots++;
-        ytitle = particleNameToLatex(plab);
-        ofs << makeHisto2D(mass, plab, bm, xmin, xmax, ba, plabmin, plabmax, xtitle, ytitle,
-                           showErrors, dfName);
-        totalPlots++;
         if (m != finalState)
         {
+            ytitle = particleNameToLatex(clab);
+            ofs << makeHisto2D("df_for_plots", mass, clab, bm, xmin, xmax, ba, clabmin, clabmax,
+                               xtitle, ytitle, showErrors);
+            totalPlots++;
+            ytitle = particleNameToLatex(plab);
+            ofs << makeHisto2D("df_for_plots", mass, plab, bm, xmin, xmax, ba, plabmin, plabmax,
+                               xtitle, ytitle, showErrors);
+            totalPlots++;
             ytitle = particleNameToLatex(cGJ);
-            ofs << makeHisto2D(mass, cGJ, bm, xmin, xmax, ba, cGJmin, cGJmax, xtitle, ytitle,
-                               showErrors, dfName);
+            ofs << makeHisto2D("df_for_plots", mass, cGJ, bm, xmin, xmax, ba, cGJmin, cGJmax,
+                               xtitle, ytitle, showErrors);
             totalPlots++;
             ytitle = particleNameToLatex(pGJ);
-            ofs << makeHisto2D(mass, pGJ, bm, xmin, xmax, ba, pGJmin, pGJmax, xtitle, ytitle,
-                               showErrors, dfName);
+            ofs << makeHisto2D("df_for_plots", mass, pGJ, bm, xmin, xmax, ba, pGJmin, pGJmax,
+                               xtitle, ytitle, showErrors);
             totalPlots++;
             ytitle = particleNameToLatex(cH);
-            ofs << makeHisto2D(mass, cH, bm, xmin, xmax, ba, cHmin, cHmax, xtitle, ytitle,
-                               showErrors, dfName);
+            ofs << makeHisto2D("df_for_plots", mass, cH, bm, xmin, xmax, ba, cHmin, cHmax, xtitle,
+                               ytitle, showErrors);
             totalPlots++;
             ytitle = particleNameToLatex(pH);
-            ofs << makeHisto2D(mass, pH, bm, xmin, xmax, ba, pHmin, pHmax, xtitle, ytitle,
-                               showErrors, dfName);
+            ofs << makeHisto2D("df_for_plots", mass, pH, bm, xmin, xmax, ba, pHmin, pHmax, xtitle,
+                               ytitle, showErrors);
             totalPlots++;
         }
     }
@@ -887,7 +931,6 @@ int main(int argc, char **argv)
     {
         for (size_t j = i + 1; j < cols.size(); ++j)
         {
-            string dfName = "df";
             string x = "mass_" + cols[i];
             string y = "mass_" + cols[j];
             double xmin = df.Min<double>(x).GetValue();
@@ -916,13 +959,16 @@ int main(int argc, char **argv)
                 }
             }
 
-            // If both are resonances same one, use 1D weight; complex 2D combined weights will be
-            // defined for Dalitz below
-            ofs << makeHisto2D(x, y, bx, xmin, xmax, by, ymin, ymax, xtitle, ytitle, showErrors,
-                               dfName,
-                               (res_x.empty() && res_y.empty()
-                                    ? ""
-                                    : (res_x == res_y && !res_x.empty() ? "sb_w_" + res_x : "")));
+            // If both are the same resonance, attach the 1D weight; otherwise no weight for
+            // correlation plots
+            string weightCol = "";
+            if (!res_x.empty() && res_x == res_y)
+            {
+                weightCol = "sb_w_" + res_x;
+            }
+
+            ofs << makeHisto2D("df_for_plots", x, y, bx, xmin, xmax, by, ymin, ymax, xtitle, ytitle,
+                               showErrors, weightCol);
             totalPlots++;
         }
     }
@@ -957,7 +1003,9 @@ int main(int argc, char **argv)
             string sq1 = b1 + "_sq";
             string sq2 = b2 + "_sq";
             string dfName = "df2_" + std::to_string(counter);
-            ofs << "  auto " << dfName << " = df.Define(\"" << sq1
+
+            // create per-pair RNode starting from 'node' (user filters applied)
+            ofs << "  auto " << dfName << " = node.Define(\"" << sq1
                 << "\",[](double x){return x*x;}, {\"" << b1 << "\"}).Define(\"" << sq2
                 << "\",[](double x){return x*x;}, {\"" << b2 << "\"});\n";
 
@@ -1001,14 +1049,13 @@ int main(int argc, char **argv)
             string weightName = "";
             if (!r1.empty() && !r2.empty())
             {
-                // create combined weight name
                 weightName = "sb_w_" + r1 + "_" + r2;
-                // build the lambda with numeric literals for boundaries
                 const auto &A = resonanceBounds[r1];
                 const auto &B = resonanceBounds[r2];
 
                 ofs << "  // combined 2D sideband weight for resonances '" << r1 << "' and '" << r2
                     << "'\n";
+                // implement the lambda as a Define on the pair node (dfName)
                 ofs << "  " << dfName << " = " << dfName << ".Define(\"" << weightName
                     << "\", [](double m1, double m2){\n";
 
@@ -1102,18 +1149,23 @@ int main(int argc, char **argv)
                 ofs << "  }, {\"" << b1 << "\", \"" << b2 << "\"});\n";
             }
 
-            ofs << makeHisto2D(sq1, sq2, binsx, min1 * min1, max1 * max1, binsy, min2 * min2,
-                               max2 * max2, xtitle, ytitle, showErrors, dfName, weightName);
+            ofs << makeHisto2D(dfName, sq1, sq2, binsx, min1 * min1, max1 * max1, binsy,
+                               min2 * min2, max2 * max2, xtitle, ytitle, showErrors, weightName);
             counter++;
             totalPlots++;
         }
     }
-    ofs << "std::cout << std::endl;";
+    ofs << "  std::cout << std::endl;\n";
 
-    ofs << "histograms->Close();\n";
-    ofs << "}";
+    ofs << "  histograms->Close();\n";
+    ofs << "}\n";
 
     ofs.close();
     ofs.open("totalPlots.txt");
     ofs << totalPlots;
+    ofs.close();
+
+    std::cout << "Generator finished. wrote: " << outFile << "\n";
+    std::cout << "Total plots: " << totalPlots << "\n";
+    return 0;
 }
